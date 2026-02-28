@@ -1,0 +1,4 @@
+Django==5.1.6
+SQLAlchemy==2.0.38
+django-cors-headers==4.7.0
+python-multipart==0.0.20
