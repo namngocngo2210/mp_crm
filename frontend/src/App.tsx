@@ -1,5 +1,5 @@
-import { FormEvent, useEffect, useRef, useState } from 'react'
-import { BarChart3, CalendarDays, ChevronDown, Coins, KeyRound, Layers3, ListChecks, LogOut, Package, PanelLeftClose, PanelLeftOpen, UserRound, Users, UsersRound } from 'lucide-react'
+import { FormEvent, MouseEvent as ReactMouseEvent, useEffect, useRef, useState } from 'react'
+import { BarChart3, CalendarDays, ChevronDown, Coins, FileText, KeyRound, Layers3, ListChecks, LogOut, Package, PanelLeftClose, PanelLeftOpen, UserRound, Users, UsersRound } from 'lucide-react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import CustomersPage from './pages/CustomersPage'
 import ProductsPage from './pages/ProductsPage'
@@ -8,6 +8,7 @@ import UnitWeightOptionsPage from './pages/UnitWeightOptionsPage'
 import ItemsPage from './pages/ItemsPage'
 import RawMaterialPricesPage from './pages/RawMaterialPricesPage'
 import ProcessingPricesPage from './pages/ProcessingPricesPage'
+import QuotationsPage from './pages/QuotationsPage'
 import ProductionPlanPage from './pages/ProductionPlanPage'
 import UserManagementPage from './pages/UserManagementPage'
 import StatisticsPage from './pages/StatisticsPage'
@@ -20,7 +21,7 @@ type ToastItem = { id: number; message: string; type: ToastType }
 
 type LoginResponse = { token: string; user: AppUser }
 
-const MAIN_ROUTES = ['/stats', '/customers', '/products', '/material-groups', '/unit-weight-options', '/items', '/raw-material-prices', '/processing-prices', '/plans']
+const MAIN_ROUTES = ['/stats', '/customers', '/products', '/material-groups', '/unit-weight-options', '/items', '/raw-material-prices', '/processing-prices', '/quotations', '/plans']
 
 export default function App() {
   const navigate = useNavigate()
@@ -112,6 +113,20 @@ export default function App() {
     }
     void refreshNearEtdPlanCount()
   }, [token, pathname])
+
+  const openRoute = (path: string, newTab = false) => {
+    if (newTab) {
+      window.open(path, '_blank', 'noopener')
+      return
+    }
+    navigate(path)
+  }
+
+  const onRouteAuxClick = (path: string) => (e: ReactMouseEvent<HTMLButtonElement>) => {
+    if (e.button !== 1) return
+    e.preventDefault()
+    openRoute(path, true)
+  }
 
   const pushToast = (message: string, type: ToastType) => {
     const item: ToastItem = { id: Date.now() + Math.floor(Math.random() * 1000), message, type }
@@ -279,7 +294,7 @@ export default function App() {
   const avatarFallback = (me?.full_name || me?.username || 'U').slice(0, 1).toUpperCase()
   const isProductsSection = pathname.startsWith('/products')
   const isMaterialSection = pathname === '/material-groups' || pathname === '/unit-weight-options'
-  const isQuotationSection = pathname === '/raw-material-prices' || pathname === '/processing-prices'
+  const isQuotationSection = pathname === '/raw-material-prices' || pathname === '/processing-prices' || pathname === '/quotations'
 
   return (
     <>
@@ -309,10 +324,10 @@ export default function App() {
               </button>
               {menuOpen ? (
                 <div className="user-menu-dropdown">
-                  <button type="button" onClick={() => { navigate('/account'); setMenuOpen(false) }}>
+                  <button type="button" onClick={() => { openRoute('/account'); setMenuOpen(false) }} onAuxClick={onRouteAuxClick('/account')}>
                     <UserRound size={15} /> {tr('menuAccount')}
                   </button>
-                  <button type="button" onClick={() => { navigate('/users'); setMenuOpen(false) }}>
+                  <button type="button" onClick={() => { openRoute('/users'); setMenuOpen(false) }} onAuxClick={onRouteAuxClick('/users')}>
                     <UsersRound size={15} /> {tr('menuUsers')}
                   </button>
                   <button type="button" onClick={() => void doLogout()}>
@@ -332,15 +347,15 @@ export default function App() {
                 <div className="sidebar-brand-text">MINH PHUONG GROUP</div>
               </div>
               <nav className="sidebar-nav">
-                <button className={`side-btn ${pathname === '/stats' ? 'active' : ''}`} type="button" onClick={() => navigate('/stats')}>
+                <button className={`side-btn ${pathname === '/stats' ? 'active' : ''}`} type="button" onClick={() => openRoute('/stats')} onAuxClick={onRouteAuxClick('/stats')}>
                   <BarChart3 size={15} />
                   <span className="side-label">{tr('tabStats')}</span>
                 </button>
-                <button className={`side-btn ${pathname === '/customers' ? 'active' : ''}`} type="button" onClick={() => navigate('/customers')}>
+                <button className={`side-btn ${pathname === '/customers' ? 'active' : ''}`} type="button" onClick={() => openRoute('/customers')} onAuxClick={onRouteAuxClick('/customers')}>
                   <Users size={15} />
                   <span className="side-label">{tr('tabCustomers')}</span>
                 </button>
-                <button className={`side-btn ${isProductsSection ? 'active' : ''}`} type="button" onClick={() => navigate('/products')}>
+                <button className={`side-btn ${isProductsSection ? 'active' : ''}`} type="button" onClick={() => openRoute('/products')} onAuxClick={onRouteAuxClick('/products')}>
                   <Package size={15} />
                   <span className="side-label">{tr('tabProducts')}</span>
                 </button>
@@ -349,11 +364,12 @@ export default function App() {
                   type="button"
                   onClick={() => {
                     if (sidebarCollapsed) {
-                      navigate('/material-groups')
+                      openRoute('/material-groups')
                     } else {
                       setMaterialMenuOpen((v) => !v)
                     }
                   }}
+                  onAuxClick={onRouteAuxClick('/material-groups')}
                 >
                   <Layers3 size={15} />
                   <span className="side-label">{tr('materialGroup')}</span>
@@ -361,19 +377,19 @@ export default function App() {
                 </button>
                 {!sidebarCollapsed && materialMenuOpen ? (
                   <div className="side-submenu">
-                    <button className={`side-sub-btn ${pathname === '/material-groups' ? 'active' : ''}`} type="button" onClick={() => navigate('/material-groups')}>
+                    <button className={`side-sub-btn ${pathname === '/material-groups' ? 'active' : ''}`} type="button" onClick={() => openRoute('/material-groups')} onAuxClick={onRouteAuxClick('/material-groups')}>
                       {tr('materialGroup')}
                     </button>
-                    <button className={`side-sub-btn ${pathname === '/unit-weight-options' ? 'active' : ''}`} type="button" onClick={() => navigate('/unit-weight-options')}>
+                    <button className={`side-sub-btn ${pathname === '/unit-weight-options' ? 'active' : ''}`} type="button" onClick={() => openRoute('/unit-weight-options')} onAuxClick={onRouteAuxClick('/unit-weight-options')}>
                       {tr('unitWeightOptions')}
                     </button>
                   </div>
                 ) : null}
-                <button className={`side-btn ${pathname === '/items' ? 'active' : ''}`} type="button" onClick={() => navigate('/items')}>
+                <button className={`side-btn ${pathname === '/items' ? 'active' : ''}`} type="button" onClick={() => openRoute('/items')} onAuxClick={onRouteAuxClick('/items')}>
                   <ListChecks size={15} />
                   <span className="side-label">{tr('itemList')}</span>
                 </button>
-                <button className={`side-btn ${pathname === '/plans' ? 'active' : ''}`} type="button" onClick={() => navigate('/plans')}>
+                <button className={`side-btn ${pathname === '/plans' ? 'active' : ''}`} type="button" onClick={() => openRoute('/plans')} onAuxClick={onRouteAuxClick('/plans')}>
                   <CalendarDays size={15} />
                   <span className="side-label">{tr('tabPlans')}</span>
                   {nearEtdPlanCount > 0 ? <span className="side-count-badge">({nearEtdPlanCount})</span> : null}
@@ -383,11 +399,12 @@ export default function App() {
                   type="button"
                   onClick={() => {
                     if (sidebarCollapsed) {
-                      navigate('/raw-material-prices')
+                      openRoute('/quotations')
                     } else {
                       setQuotationMenuOpen((v) => !v)
                     }
                   }}
+                  onAuxClick={onRouteAuxClick('/quotations')}
                 >
                   <Coins size={15} />
                   <span className="side-label">{tr('tabQuotation')}</span>
@@ -395,10 +412,13 @@ export default function App() {
                 </button>
                 {!sidebarCollapsed && quotationMenuOpen ? (
                   <div className="side-submenu">
-                    <button className={`side-sub-btn ${pathname === '/raw-material-prices' ? 'active' : ''}`} type="button" onClick={() => navigate('/raw-material-prices')}>
+                    <button className={`side-sub-btn ${pathname === '/quotations' ? 'active' : ''}`} type="button" onClick={() => openRoute('/quotations')} onAuxClick={onRouteAuxClick('/quotations')}>
+                      <FileText size={14} /> {tr('tabQuotationList')}
+                    </button>
+                    <button className={`side-sub-btn ${pathname === '/raw-material-prices' ? 'active' : ''}`} type="button" onClick={() => openRoute('/raw-material-prices')} onAuxClick={onRouteAuxClick('/raw-material-prices')}>
                       {tr('tabRawMaterialPrices')}
                     </button>
-                    <button className={`side-sub-btn ${pathname === '/processing-prices' ? 'active' : ''}`} type="button" onClick={() => navigate('/processing-prices')}>
+                    <button className={`side-sub-btn ${pathname === '/processing-prices' ? 'active' : ''}`} type="button" onClick={() => openRoute('/processing-prices')} onAuxClick={onRouteAuxClick('/processing-prices')}>
                       {tr('tabProcessingPrices')}
                     </button>
                   </div>
@@ -414,6 +434,7 @@ export default function App() {
               {pathname === '/items' ? <ItemsPage token={token} notify={pushToast} t={tr} /> : null}
               {pathname === '/raw-material-prices' ? <RawMaterialPricesPage token={token} notify={pushToast} t={tr} /> : null}
               {pathname === '/processing-prices' ? <ProcessingPricesPage token={token} notify={pushToast} t={tr} /> : null}
+              {pathname === '/quotations' ? <QuotationsPage token={token} notify={pushToast} t={tr} /> : null}
               {pathname === '/plans' ? <ProductionPlanPage token={token} notify={pushToast} t={tr} onPlansChanged={refreshNearEtdPlanCount} /> : null}
             </div>
           </div>
@@ -423,7 +444,7 @@ export default function App() {
           <div className="card">
             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
               <strong>{tr('accountInfo')}</strong>
-              <button type="button" onClick={() => navigate('/customers')}>{tr('close')}</button>
+              <button type="button" onClick={() => openRoute('/customers')} onAuxClick={onRouteAuxClick('/customers')}>{tr('close')}</button>
             </div>
 
             <form onSubmit={saveAccount}>
@@ -480,7 +501,7 @@ export default function App() {
           <>
             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
               <strong>{tr('userManagement')}</strong>
-              <button type="button" onClick={() => navigate('/customers')}>{tr('close')}</button>
+              <button type="button" onClick={() => openRoute('/customers')} onAuxClick={onRouteAuxClick('/customers')}>{tr('close')}</button>
             </div>
             <UserManagementPage token={token} notify={pushToast} currentUser={me} t={tr} />
           </>

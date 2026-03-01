@@ -26,6 +26,7 @@ from .models import (
     Customer,
     Item,
     ProcessingPrice,
+    Quotation,
     RawMaterialPrice,
     MaterialGroup,
     UnitWeightOption,
@@ -88,6 +89,19 @@ SPEC_ABC_PATTERN = re.compile(r"^\s*[^*]+\s*\*\s*\d+(?:\.\d+)?\s*\*\s*\d+(?:\.\d
 FORMULA_ALLOWED_PATTERN = re.compile(r"^[A-Za-z0-9_+\-*/().\s]+$")
 A_NUMBER_PATTERN = re.compile(r"[-+]?\d+(?:\.\d+)?")
 PHI_TO_DIAMETER_PATTERN = re.compile(r"phi(?=\s*\d)|\bphi\b", re.IGNORECASE)
+CUSTOMER_LEVEL_FACTORS = {
+    "A": 0.97,
+    "B": 0.98,
+    "C": 1.00,
+    "N": 1.02,
+}
+
+
+def _normalize_customer_level(v):
+    level = _upper_or_none(v)
+    if level is None:
+        return None
+    return level if level in CUSTOMER_LEVEL_FACTORS else None
 
 
 def _normalize_phi_text(v):
@@ -679,6 +693,43 @@ def _ensure_processing_prices_table() -> None:
                 """
             )
         )
+
+
+def _ensure_quotations_table() -> None:
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS quotations (
+                    id INTEGER NOT NULL PRIMARY KEY,
+                    customer_id INTEGER NOT NULL,
+                    product_id INTEGER NOT NULL,
+                    has_lami BOOLEAN NOT NULL DEFAULT 0,
+                    lami_unit_price NUMERIC(12,4) NOT NULL DEFAULT 0.429,
+                    level_code VARCHAR(10),
+                    level_factor NUMERIC(12,4) NOT NULL DEFAULT 1,
+                    size_value VARCHAR(255),
+                    total_weight_kg NUMERIC(14,4) NOT NULL DEFAULT 0,
+                    pe_weight_kg NUMERIC(14,4) NOT NULL DEFAULT 0,
+                    pp_weight_kg NUMERIC(14,4) NOT NULL DEFAULT 0,
+                    amount_weight NUMERIC(14,4) NOT NULL DEFAULT 0,
+                    amount_lami NUMERIC(14,4) NOT NULL DEFAULT 0,
+                    amount_color NUMERIC(14,4) NOT NULL DEFAULT 0,
+                    amount_extra NUMERIC(14,4) NOT NULL DEFAULT 0,
+                    subtotal NUMERIC(14,4) NOT NULL DEFAULT 0,
+                    total NUMERIC(14,4) NOT NULL DEFAULT 0,
+                    row_payload TEXT,
+                    note TEXT,
+                    deleted_at DATETIME,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_quotations_customer_id ON quotations (customer_id)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_quotations_product_id ON quotations (product_id)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_quotations_level_code ON quotations (level_code)"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_processing_prices_process_name ON processing_prices (process_name)"))
         conn.execute(
             text(
@@ -707,6 +758,8 @@ def serialize_user(u: User):
 
 
 def serialize_customer(c: Customer):
+    level = _normalize_customer_level(c.level)
+    level_factor = CUSTOMER_LEVEL_FACTORS.get(level) if level else None
     return {
         "id": c.id,
         "customer_code": c.customer_code,
@@ -718,7 +771,9 @@ def serialize_customer(c: Customer):
         "production_2025": to_num(c.production_2025),
         "production_2026": to_num(c.production_2026),
         "in_production": to_num(c.in_production),
-        "level": c.level,
+        "level": level,
+        "level_factor": level_factor,
+        "level_percent": (level_factor * 100.0) if level_factor is not None else None,
         "created_at": fmt_datetime(c.created_at),
         "updated_at": fmt_datetime(c.updated_at),
     }
@@ -784,6 +839,138 @@ def serialize_processing_price(r: ProcessingPrice):
         "note": r.note,
         "created_at": fmt_datetime(r.created_at),
         "updated_at": fmt_datetime(r.updated_at),
+    }
+
+
+def _sanitize_extra_rows(rows) -> list[dict]:
+    out: list[dict] = []
+    if not isinstance(rows, list):
+        return out
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = _str_or_none(row.get("name")) or ""
+        value = _str_or_none(row.get("value"))
+        amount = _to_float_or_none(row.get("amount"))
+        out.append(
+            {
+                "name": name,
+                "value": value,
+                "amount": 0.0 if amount is None else amount,
+            }
+        )
+    return out
+
+
+def _sum_product_spec_weight(session, product_id: int):
+    specs = session.scalars(
+        select(ProductSpec)
+        .where(ProductSpec.product_id == product_id, _active(ProductSpec))
+        .order_by(ProductSpec.id.asc())
+    ).all()
+    total_weight = 0.0
+    pe_weight = 0.0
+    pe_names = {"tarpaulin", "pe liner"}
+    for spec in specs:
+        wt = _compute_wt_kg(spec.unit_weight_kg, spec.qty_m_or_m2, spec.pcs_ea)
+        if wt is None:
+            wt = _to_float_or_none(spec.wt_kg)
+        if wt is None:
+            continue
+        total_weight += wt
+        mg_name = _norm_text(spec.material_group.material_group_name if spec.material_group else None)
+        if mg_name in pe_names:
+            pe_weight += wt
+    pp_weight = total_weight - pe_weight
+    if pp_weight < 0:
+        pp_weight = 0
+    return total_weight, pe_weight, pp_weight
+
+
+def _get_unit_price(session, model, name_field, value: str):
+    row = session.scalar(select(model).where(name_field == value, _active(model)))
+    if not row:
+        return 0.0
+    return _to_float_or_none(row.unit_price) or 0.0
+
+
+def _build_quotation_snapshot(session, customer: Customer, product: Product, has_lami: bool, extra_rows):
+    level = _normalize_customer_level(customer.level) or "C"
+    level_factor = CUSTOMER_LEVEL_FACTORS.get(level, 1.0)
+    total_weight, pe_weight, pp_weight = _sum_product_spec_weight(session, product.id)
+    tb_price = _get_unit_price(session, RawMaterialPrice, RawMaterialPrice.material_name, "TB")
+    processing_price = _get_unit_price(session, ProcessingPrice, ProcessingPrice.process_name, "Gia công")
+    amount_weight = total_weight * (tb_price + processing_price)
+    lami_unit_price = 0.429
+    amount_lami = lami_unit_price if has_lami else 0.0
+    color_code = (_upper_or_none(product.color) or "").strip()
+    amount_color = 0.0 if color_code in {"BG", "WT"} else 0.1
+    extras = _sanitize_extra_rows(extra_rows)
+    amount_extra = sum(float(r.get("amount") or 0) for r in extras)
+    subtotal = amount_weight + amount_lami + amount_color + amount_extra
+    total = subtotal * level_factor
+    payload = {
+        "rows": [
+            {"name": "customer_code", "value": customer.customer_code, "amount": None},
+            {"name": "product_code", "value": product.product_code, "amount": None},
+            {"name": "size", "value": product.spec_inner, "amount": None},
+            {"name": "weight", "value": total_weight, "amount": amount_weight},
+            {"name": "pe", "value": pe_weight, "amount": None},
+            {"name": "pp", "value": pp_weight, "amount": None},
+            {"name": "lami", "value": "Y" if has_lami else "N", "amount": amount_lami},
+            {"name": "color", "value": product.color, "amount": amount_color},
+        ],
+        "extra_rows": extras,
+    }
+    return {
+        "has_lami": has_lami,
+        "lami_unit_price": lami_unit_price,
+        "level_code": level,
+        "level_factor": level_factor,
+        "size_value": _str_or_none(product.spec_inner),
+        "total_weight_kg": total_weight,
+        "pe_weight_kg": pe_weight,
+        "pp_weight_kg": pp_weight,
+        "amount_weight": amount_weight,
+        "amount_lami": amount_lami,
+        "amount_color": amount_color,
+        "amount_extra": amount_extra,
+        "subtotal": subtotal,
+        "total": total,
+        "row_payload": json.dumps(payload, ensure_ascii=False),
+    }
+
+
+def serialize_quotation(item: Quotation):
+    payload = {}
+    raw_payload = _str_or_none(item.row_payload)
+    if raw_payload:
+        try:
+            payload = json.loads(raw_payload)
+        except Exception:
+            payload = {}
+    return {
+        "id": item.id,
+        "customer_id": item.customer_id,
+        "product_id": item.product_id,
+        "has_lami": bool(item.has_lami),
+        "lami_unit_price": to_num(item.lami_unit_price),
+        "level_code": item.level_code,
+        "level_factor": to_num(item.level_factor),
+        "size_value": item.size_value,
+        "total_weight_kg": to_num(item.total_weight_kg),
+        "pe_weight_kg": to_num(item.pe_weight_kg),
+        "pp_weight_kg": to_num(item.pp_weight_kg),
+        "amount_weight": to_num(item.amount_weight),
+        "amount_lami": to_num(item.amount_lami),
+        "amount_color": to_num(item.amount_color),
+        "amount_extra": to_num(item.amount_extra),
+        "subtotal": to_num(item.subtotal),
+        "total": to_num(item.total),
+        "row_payload": payload,
+        "note": item.note,
+        "created_at": fmt_datetime(item.created_at),
+        "updated_at": fmt_datetime(item.updated_at),
     }
 
 
@@ -1379,6 +1566,10 @@ def customers(request: HttpRequest):
 
         if request.method == "POST":
             body = _body(request)
+            level_input = body.get("level")
+            level = _normalize_customer_level(level_input)
+            if _str_or_none(level_input) and level is None:
+                return _ok({"detail": "Cấp độ khách hàng không hợp lệ. Chỉ chấp nhận A/B/C/N"}, 400)
             item = Customer(
                 customer_code=body["customer_code"],
                 customer_name=body["customer_name"],
@@ -1389,7 +1580,7 @@ def customers(request: HttpRequest):
                 production_2025=body.get("production_2025") or 0,
                 production_2026=body.get("production_2026") or 0,
                 in_production=body.get("in_production") or 0,
-                level=body.get("level"),
+                level=level,
             )
             session.add(item)
             session.flush()
@@ -1482,6 +1673,10 @@ def customers_import_excel(request: HttpRequest):
                 reasons.append("Trùng email")
             if phone_key and (phone_key in existing_phones or phone_key in seen_phones):
                 reasons.append("Trùng số điện thoại")
+            level_raw = _str_or_none(val(row, "level"))
+            level = _normalize_customer_level(level_raw)
+            if level_raw and level is None:
+                reasons.append("Cấp độ không hợp lệ (chỉ A/B/C/N)")
 
             if reasons:
                 failed.append(
@@ -1504,7 +1699,7 @@ def customers_import_excel(request: HttpRequest):
                 "production_2025": _num_or_zero(val(row, "production_2025")),
                 "production_2026": _num_or_zero(val(row, "production_2026")),
                 "in_production": _num_or_zero(val(row, "in_production")),
-                "level": _str_or_none(val(row, "level")),
+                "level": level,
             }
             session.add(Customer(**payload))
             created += 1
@@ -1540,6 +1735,12 @@ def customer_detail(request: HttpRequest, item_id: int):
 
         if request.method == "PUT":
             body = _body(request)
+            if "level" in body:
+                level_input = body.get("level")
+                level = _normalize_customer_level(level_input)
+                if _str_or_none(level_input) and level is None:
+                    return _ok({"detail": "Cấp độ khách hàng không hợp lệ. Chỉ chấp nhận A/B/C/N"}, 400)
+                body["level"] = level
             for f in [
                 "customer_code",
                 "customer_name",
@@ -2218,6 +2419,180 @@ def processing_price_detail(request: HttpRequest, item_id: int):
             session.add(row)
             session.flush()
             return _ok(serialize_processing_price(row))
+
+        if request.method == "DELETE":
+            row.deleted_at = _now()
+            session.add(row)
+            session.flush()
+            return _ok({"success": True})
+
+    return _ok({"detail": "Method not allowed"}, 405)
+
+
+@csrf_exempt
+@require_auth
+def quotation_preview(request: HttpRequest):
+    _ensure_quotations_table()
+    _ensure_raw_material_prices_table()
+    _ensure_processing_prices_table()
+    if request.method != "POST":
+        return _ok({"detail": "Method not allowed"}, 405)
+    with get_session() as session:
+        body = _body(request)
+        customer_id = body.get("customer_id")
+        product_id = body.get("product_id")
+        if not customer_id or not product_id:
+            return _ok({"detail": "Thiếu customer_id hoặc product_id"}, 400)
+        customer = session.scalar(select(Customer).where(Customer.id == int(customer_id), _active(Customer)))
+        product = session.scalar(select(Product).where(Product.id == int(product_id), _active(Product)))
+        if not customer or not product:
+            return _ok({"detail": "Khách hàng hoặc sản phẩm không hợp lệ"}, 400)
+        snapshot = _build_quotation_snapshot(
+            session,
+            customer,
+            product,
+            bool(body.get("has_lami")),
+            body.get("extra_rows"),
+        )
+        try:
+            snapshot["row_payload"] = json.loads(snapshot.get("row_payload") or "{}")
+        except Exception:
+            snapshot["row_payload"] = {}
+        return _ok(snapshot)
+
+
+def _serialize_quotation_with_refs(session, item: Quotation):
+    data = serialize_quotation(item)
+    customer = session.scalar(select(Customer).where(Customer.id == item.customer_id))
+    product = session.scalar(select(Product).where(Product.id == item.product_id))
+    data["customer_code"] = customer.customer_code if customer else None
+    data["customer_name"] = customer.customer_name if customer else None
+    data["product_code"] = product.product_code if product else None
+    data["product_name"] = product.product_name if product else None
+    return data
+
+
+@csrf_exempt
+@require_auth
+def quotations(request: HttpRequest):
+    _ensure_quotations_table()
+    _ensure_raw_material_prices_table()
+    _ensure_processing_prices_table()
+    with get_session() as session:
+        if request.method == "GET":
+            search = (request.GET.get("search") or "").strip().lower()
+            rows = session.scalars(select(Quotation).where(_active(Quotation)).order_by(Quotation.id.desc())).all()
+            out = []
+            for row in rows:
+                item = _serialize_quotation_with_refs(session, row)
+                if search:
+                    hay = " ".join(
+                        [
+                            (item.get("customer_code") or ""),
+                            (item.get("customer_name") or ""),
+                            (item.get("product_code") or ""),
+                            (item.get("product_name") or ""),
+                        ]
+                    ).lower()
+                    if search not in hay:
+                        continue
+                out.append(item)
+            return _ok(out)
+
+        if request.method == "POST":
+            body = _body(request)
+            customer_id = body.get("customer_id")
+            product_id = body.get("product_id")
+            if not customer_id or not product_id:
+                return _ok({"detail": "Thiếu customer_id hoặc product_id"}, 400)
+            customer = session.scalar(select(Customer).where(Customer.id == int(customer_id), _active(Customer)))
+            product = session.scalar(select(Product).where(Product.id == int(product_id), _active(Product)))
+            if not customer or not product:
+                return _ok({"detail": "Khách hàng hoặc sản phẩm không hợp lệ"}, 400)
+            snapshot = _build_quotation_snapshot(
+                session,
+                customer,
+                product,
+                bool(body.get("has_lami")),
+                body.get("extra_rows"),
+            )
+            row = Quotation(
+                customer_id=customer.id,
+                product_id=product.id,
+                has_lami=snapshot["has_lami"],
+                lami_unit_price=snapshot["lami_unit_price"],
+                level_code=snapshot["level_code"],
+                level_factor=snapshot["level_factor"],
+                size_value=snapshot["size_value"],
+                total_weight_kg=snapshot["total_weight_kg"],
+                pe_weight_kg=snapshot["pe_weight_kg"],
+                pp_weight_kg=snapshot["pp_weight_kg"],
+                amount_weight=snapshot["amount_weight"],
+                amount_lami=snapshot["amount_lami"],
+                amount_color=snapshot["amount_color"],
+                amount_extra=snapshot["amount_extra"],
+                subtotal=snapshot["subtotal"],
+                total=snapshot["total"],
+                row_payload=snapshot["row_payload"],
+                note=_str_or_none(body.get("note")),
+            )
+            session.add(row)
+            session.flush()
+            return _ok(_serialize_quotation_with_refs(session, row), 201)
+
+    return _ok({"detail": "Method not allowed"}, 405)
+
+
+@csrf_exempt
+@require_auth
+def quotation_detail(request: HttpRequest, item_id: int):
+    _ensure_quotations_table()
+    _ensure_raw_material_prices_table()
+    _ensure_processing_prices_table()
+    with get_session() as session:
+        row = session.scalar(select(Quotation).where(Quotation.id == item_id, _active(Quotation)))
+        if not row:
+            return _ok({"detail": "Not found"}, 404)
+
+        if request.method == "GET":
+            return _ok(_serialize_quotation_with_refs(session, row))
+
+        if request.method == "PUT":
+            body = _body(request)
+            customer_id = body.get("customer_id", row.customer_id)
+            product_id = body.get("product_id", row.product_id)
+            customer = session.scalar(select(Customer).where(Customer.id == int(customer_id), _active(Customer)))
+            product = session.scalar(select(Product).where(Product.id == int(product_id), _active(Product)))
+            if not customer or not product:
+                return _ok({"detail": "Khách hàng hoặc sản phẩm không hợp lệ"}, 400)
+            snapshot = _build_quotation_snapshot(
+                session,
+                customer,
+                product,
+                bool(body.get("has_lami")),
+                body.get("extra_rows"),
+            )
+            row.customer_id = customer.id
+            row.product_id = product.id
+            row.has_lami = snapshot["has_lami"]
+            row.lami_unit_price = snapshot["lami_unit_price"]
+            row.level_code = snapshot["level_code"]
+            row.level_factor = snapshot["level_factor"]
+            row.size_value = snapshot["size_value"]
+            row.total_weight_kg = snapshot["total_weight_kg"]
+            row.pe_weight_kg = snapshot["pe_weight_kg"]
+            row.pp_weight_kg = snapshot["pp_weight_kg"]
+            row.amount_weight = snapshot["amount_weight"]
+            row.amount_lami = snapshot["amount_lami"]
+            row.amount_color = snapshot["amount_color"]
+            row.amount_extra = snapshot["amount_extra"]
+            row.subtotal = snapshot["subtotal"]
+            row.total = snapshot["total"]
+            row.row_payload = snapshot["row_payload"]
+            row.note = _str_or_none(body.get("note"))
+            session.add(row)
+            session.flush()
+            return _ok(_serialize_quotation_with_refs(session, row))
 
         if request.method == "DELETE":
             row.deleted_at = _now()

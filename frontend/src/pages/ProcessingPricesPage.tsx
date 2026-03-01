@@ -9,6 +9,10 @@ import FormModal from '../components/FormModal'
 type Props = { token: string; notify: (message: string, type: 'success' | 'error') => void; t: (key: I18nKey) => string }
 
 const PAGE_SIZE_OPTIONS = [5, 10]
+const fmt2 = (v?: number | null) => {
+  if (v == null || Number.isNaN(Number(v))) return '-'
+  return Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
 
 export default function ProcessingPricesPage({ token, notify, t }: Props) {
   const [rows, setRows] = useState<ProcessingPrice[]>([])
@@ -181,7 +185,7 @@ export default function ProcessingPricesPage({ token, notify, t }: Props) {
                   })
                 }} /></td>
                 <td>{r.process_name}</td>
-                <td>{`${r.unit_price}$`}</td>
+                <td>{`${fmt2(r.unit_price)}$`}</td>
                 <td>{r.note || '-'}</td>
                 <td>{r.updated_at}</td>
                 <td>

@@ -9,6 +9,10 @@ import FormModal from '../components/FormModal'
 type Props = { token: string; notify: (message: string, type: 'success' | 'error') => void; t: (key: I18nKey) => string }
 
 const PAGE_SIZE_OPTIONS = [5, 10]
+const fmt2 = (v?: number | null) => {
+  if (v == null || Number.isNaN(Number(v))) return '-'
+  return Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
 
 export default function RawMaterialPricesPage({ token, notify, t }: Props) {
   const [rows, setRows] = useState<RawMaterialPrice[]>([])
@@ -182,7 +186,7 @@ export default function RawMaterialPricesPage({ token, notify, t }: Props) {
                 }} /></td>
                 <td>{r.material_name}</td>
                 <td>{r.unit}</td>
-                <td>{`${r.unit_price}$`}</td>
+                <td>{`${fmt2(r.unit_price)}$`}</td>
                 <td>{r.updated_at}</td>
                 <td>
                   <div className="row action-row">

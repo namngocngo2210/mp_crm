@@ -6,6 +6,13 @@ import { I18nKey } from '../lib/i18n'
 import ConfirmModal from '../components/ConfirmModal'
 import FormModal from '../components/FormModal'
 
+const CUSTOMER_LEVEL_OPTIONS = [
+  { value: 'A', percent: 97 },
+  { value: 'B', percent: 98 },
+  { value: 'C', percent: 100 },
+  { value: 'N', percent: 102 },
+] as const
+
 type Props = { token: string; notify: (message: string, type: 'success' | 'error') => void; t: (key: I18nKey) => string }
 
 const emptyForm = {
@@ -18,7 +25,7 @@ const emptyForm = {
   production_2025: '',
   production_2026: '',
   in_production: '',
-  level: '',
+  level: 'A',
 }
 
 export default function CustomersPage({ token, notify, t }: Props) {
@@ -35,6 +42,13 @@ export default function CustomersPage({ token, notify, t }: Props) {
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(10)
   const firstSearchRunRef = useRef(true)
+  const levelDisplay = (level?: string, levelPercent?: number) => {
+    const levelValue = (level || '').toUpperCase()
+    if (!levelValue) return '-'
+    const found = CUSTOMER_LEVEL_OPTIONS.find((o) => o.value === levelValue)
+    const percent = levelPercent ?? found?.percent
+    return percent != null ? `${levelValue} (${percent}%)` : levelValue
+  }
 
   const load = async () => {
     const data = await api<Customer[]>(`/api/customers?search=${encodeURIComponent(search)}`, 'GET', undefined, token)
@@ -100,7 +114,7 @@ export default function CustomersPage({ token, notify, t }: Props) {
       production_2025: item.production_2025 != null ? String(item.production_2025) : '',
       production_2026: item.production_2026 != null ? String(item.production_2026) : '',
       in_production: item.in_production != null ? String(item.in_production) : '',
-      level: item.level || '',
+      level: (item.level || 'A').toUpperCase(),
     })
     setError('')
     setEditingId(item.id)
@@ -214,7 +228,7 @@ export default function CustomersPage({ token, notify, t }: Props) {
                   <td>{r.contact_person}</td>
                   <td>{r.phone}</td>
                   <td>{r.email}</td>
-                  <td>{r.level}</td>
+                  <td>{levelDisplay(r.level, r.level_percent)}</td>
                   <td>{r.updated_at}</td>
                   <td>
                     <div className="row action-row">
@@ -266,7 +280,14 @@ export default function CustomersPage({ token, notify, t }: Props) {
             <div className="form-field"><label>{t('lblProduction2025')}</label><input type="number" placeholder={t('phProduction2025')} value={form.production_2025} onChange={(e) => setForm({ ...form, production_2025: e.target.value })} /></div>
             <div className="form-field"><label>{t('lblProduction2026')}</label><input type="number" placeholder={t('phProduction2026')} value={form.production_2026} onChange={(e) => setForm({ ...form, production_2026: e.target.value })} /></div>
             <div className="form-field"><label>{t('lblInProduction')}</label><input type="number" placeholder={t('phInProduction')} value={form.in_production} onChange={(e) => setForm({ ...form, in_production: e.target.value })} /></div>
-            <div className="form-field"><label>{t('lblLevel')}</label><input placeholder={t('phLevel')} value={form.level} onChange={(e) => setForm({ ...form, level: e.target.value })} /></div>
+            <div className="form-field">
+              <label>{t('lblLevel')}</label>
+              <select value={form.level} onChange={(e) => setForm({ ...form, level: e.target.value })} required>
+                {CUSTOMER_LEVEL_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>{`${opt.value} (${opt.percent}%)`}</option>
+                ))}
+              </select>
+            </div>
           </div>
           {error ? <div className="error">{error}</div> : null}
           <div className="row form-actions">

@@ -7,6 +7,8 @@ export type Customer = {
   phone?: string
   email?: string
   level?: string
+  level_factor?: number
+  level_percent?: number
   production_2025?: number
   production_2026?: number
   in_production?: number
@@ -144,6 +146,43 @@ export type ProcessingPrice = {
   process_name: string
   unit_price: number
   note?: string
+  updated_at?: string
+}
+
+export type QuotationExtraRow = {
+  name: string
+  value?: string
+  amount: number
+}
+
+export type Quotation = {
+  id: number
+  customer_id: number
+  product_id: number
+  customer_code?: string
+  customer_name?: string
+  product_code?: string
+  product_name?: string
+  has_lami: boolean
+  lami_unit_price: number
+  level_code?: string
+  level_factor?: number
+  size_value?: string
+  total_weight_kg?: number
+  pe_weight_kg?: number
+  pp_weight_kg?: number
+  amount_weight?: number
+  amount_lami?: number
+  amount_color?: number
+  amount_extra?: number
+  subtotal?: number
+  total?: number
+  row_payload?: {
+    rows?: Array<{ name: string; value?: string | number | null; amount?: number | null }>
+    extra_rows?: QuotationExtraRow[]
+  }
+  note?: string
+  created_at?: string
   updated_at?: string
 }
 

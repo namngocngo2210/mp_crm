@@ -276,3 +276,35 @@ class ProductionPlan(Base):
         CheckConstraint("order_qty_pcs >= 0", name="ck_order_qty_nonnegative"),
         Index("idx_plan_etd", "etd"),
     )
+
+
+class Quotation(Base):
+    __tablename__ = "quotations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id", ondelete="RESTRICT"), nullable=False, index=True)
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id", ondelete="RESTRICT"), nullable=False, index=True)
+    has_lami: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    lami_unit_price: Mapped[float] = mapped_column(Numeric(12, 4), nullable=False, default=0.429)
+    level_code: Mapped[str | None] = mapped_column(String(10), index=True)
+    level_factor: Mapped[float] = mapped_column(Numeric(12, 4), nullable=False, default=1)
+    size_value: Mapped[str | None] = mapped_column(String(255))
+    total_weight_kg: Mapped[float] = mapped_column(Numeric(14, 4), nullable=False, default=0)
+    pe_weight_kg: Mapped[float] = mapped_column(Numeric(14, 4), nullable=False, default=0)
+    pp_weight_kg: Mapped[float] = mapped_column(Numeric(14, 4), nullable=False, default=0)
+    amount_weight: Mapped[float] = mapped_column(Numeric(14, 4), nullable=False, default=0)
+    amount_lami: Mapped[float] = mapped_column(Numeric(14, 4), nullable=False, default=0)
+    amount_color: Mapped[float] = mapped_column(Numeric(14, 4), nullable=False, default=0)
+    amount_extra: Mapped[float] = mapped_column(Numeric(14, 4), nullable=False, default=0)
+    subtotal: Mapped[float] = mapped_column(Numeric(14, 4), nullable=False, default=0)
+    total: Mapped[float] = mapped_column(Numeric(14, 4), nullable=False, default=0)
+    row_payload: Mapped[str | None] = mapped_column(Text)
+    note: Mapped[str | None] = mapped_column(Text)
+    deleted_at: Mapped[str | None] = mapped_column(DateTime)
+    created_at: Mapped[str] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[str] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    __table_args__ = (
+        Index("idx_quotation_customer_product", "customer_id", "product_id"),
+        Index("idx_quotation_total", "total"),
+    )

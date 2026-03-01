@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from 'react'
+import { FormEvent, MouseEvent as ReactMouseEvent, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import Select from 'react-select'
 import { CheckCircle2, Eye, FileSpreadsheet, Pencil, Plus, Trash2, Upload, X, XCircle } from 'lucide-react'
@@ -532,9 +532,9 @@ export default function ProductsPage({ token, notify, t }: Props) {
     return result == null ? '-' : String(result)
   }
 
-  const formatNumberMax5 = (value: number | null | undefined) => {
+  const formatNumber2 = (value: number | null | undefined) => {
     if (value == null || Number.isNaN(value) || !Number.isFinite(value)) return '-'
-    return value.toFixed(5).replace(/\.?0+$/, '')
+    return value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
   }
 
   const onBulkRowMaterialGroupChange = (rowKey: number, value: string) => {
@@ -868,8 +868,13 @@ export default function ProductsPage({ token, notify, t }: Props) {
     }
   }
 
-  const openDetail = (product: Product) => {
-    navigate(`/products/${product.id}`)
+  const openDetail = (product: Product, newTab = false) => {
+    const path = `/products/${product.id}`
+    if (newTab) {
+      window.open(path, '_blank', 'noopener')
+      return
+    }
+    navigate(path)
   }
 
   const openPrintImagePicker = () => {
@@ -1120,9 +1125,9 @@ export default function ProductsPage({ token, notify, t }: Props) {
                             placeholder={t('fldPcsEa')}
                           />
                         </td>
-                        <td>{s.unit_weight_kg ?? '-'}</td>
-                        <td>{s.qty_m_or_m2 ?? '-'}</td>
-                        <td>{formatNumberMax5(getSpecWt(s))}</td>
+                        <td>{formatNumber2(toFiniteNumber(s.unit_weight_kg))}</td>
+                        <td>{formatNumber2(toFiniteNumber(s.qty_m_or_m2))}</td>
+                        <td>{formatNumber2(getSpecWt(s))}</td>
                     </tr>,
                     <tr className="spec-note-row" key={`${s.id}-note`}>
                         <td colSpan={5}>
@@ -1142,7 +1147,7 @@ export default function ProductsPage({ token, notify, t }: Props) {
                   {specs.length > 0 ? (
                     <tr className="summary-row">
                       <td colSpan={10} className="summary-label">{t('totalWtKg')}</td>
-                      <td className="summary-value">{formatNumberMax5(totalSpecWt)}</td>
+                      <td className="summary-value">{formatNumber2(totalSpecWt)}</td>
                     </tr>
                   ) : null}
                 </tbody>
@@ -1251,9 +1256,9 @@ export default function ProductsPage({ token, notify, t }: Props) {
                       <td><input value={row.item_size} onChange={(e) => onBulkRowItemSizeChange(row.key, e.target.value)} placeholder={t('fldItemSize')} /></td>
                       <td><input value={row.item_color} onChange={(e) => onBulkRowItemColorChange(row.key, e.target.value)} placeholder={t('phColor')} /></td>
                       <td><input value={row.pcs_ea} onChange={(e) => onBulkRowPcsEaChange(row.key, e.target.value)} placeholder={t('fldPcsEa')} /></td>
-                      <td>{row.unit_weight_kg}</td>
-                      <td>{row.qty_m_or_m2}</td>
-                      <td>{row.wt_kg}</td>
+                      <td>{formatNumber2(toFiniteNumber(row.unit_weight_kg))}</td>
+                      <td>{formatNumber2(toFiniteNumber(row.qty_m_or_m2))}</td>
+                      <td>{formatNumber2(toFiniteNumber(row.wt_kg))}</td>
                   </tr>,
                   <tr className="spec-note-row" key={`${row.key}-note`}>
                       <td colSpan={5}>
@@ -1441,6 +1446,11 @@ export default function ProductsPage({ token, notify, t }: Props) {
                       title={t('detail')}
                       aria-label={t('detail')}
                       onClick={() => void openDetail(p)}
+                      onAuxClick={(e: ReactMouseEvent<HTMLButtonElement>) => {
+                        if (e.button !== 1) return
+                        e.preventDefault()
+                        void openDetail(p, true)
+                      }}
                     >
                       <Eye size={14} />
                     </button>

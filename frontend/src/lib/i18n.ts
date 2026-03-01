@@ -17,6 +17,7 @@ const messages = {
     tabRawMaterialPrices: 'Bảng giá NVL',
     tabProcessingPrices: 'Bảng giá gia công',
     tabQuotation: 'Báo giá',
+    tabQuotationList: 'Danh sách báo giá',
     tabPlans: 'Kế hoạch sản xuất',
 
     menuAccount: 'Tài khoản',
@@ -331,6 +332,7 @@ const messages = {
     tabRawMaterialPrices: 'Raw Material Prices',
     tabProcessingPrices: 'Processing Prices',
     tabQuotation: 'Quotation',
+    tabQuotationList: 'Quotation List',
     tabPlans: 'Production Plan',
 
     menuAccount: 'Account',

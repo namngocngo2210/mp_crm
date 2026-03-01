@@ -436,6 +436,12 @@ body {
   gap: 10px;
 }
 
+.grid-3 {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
 .product-detail-info-grid {
   grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 8px 12px;
@@ -1059,6 +1065,33 @@ tr:hover td {
 
 .bulk-spec-modal .form-field {
   margin-bottom: 10px;
+}
+
+.quotation-modal {
+  width: min(1360px, 96vw);
+  height: calc(100vh - 64px);
+  display: flex;
+  flex-direction: column;
+}
+
+.quotation-modal .form-modal-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  overflow-y: auto;
+}
+
+.quotation-extra-row {
+  display: grid;
+  grid-template-columns: 1.1fr 1.1fr 0.9fr auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.quotation-extra-delete-cell {
+  display: flex;
+  justify-content: flex-end;
+  padding-bottom: 2px;
 }
 
 .bulk-spec-table-wrap {
