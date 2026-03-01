@@ -1,11 +1,13 @@
 import { FormEvent, useEffect, useRef, useState } from 'react'
-import { BarChart3, CalendarDays, ChevronDown, KeyRound, Layers3, ListChecks, LogOut, Package, PanelLeftClose, PanelLeftOpen, UserRound, Users, UsersRound } from 'lucide-react'
+import { BarChart3, CalendarDays, ChevronDown, Coins, KeyRound, Layers3, ListChecks, LogOut, Package, PanelLeftClose, PanelLeftOpen, UserRound, Users, UsersRound } from 'lucide-react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import CustomersPage from './pages/CustomersPage'
 import ProductsPage from './pages/ProductsPage'
 import MaterialGroupsPage from './pages/MaterialGroupsPage'
 import UnitWeightOptionsPage from './pages/UnitWeightOptionsPage'
 import ItemsPage from './pages/ItemsPage'
+import RawMaterialPricesPage from './pages/RawMaterialPricesPage'
+import ProcessingPricesPage from './pages/ProcessingPricesPage'
 import ProductionPlanPage from './pages/ProductionPlanPage'
 import UserManagementPage from './pages/UserManagementPage'
 import StatisticsPage from './pages/StatisticsPage'
@@ -18,7 +20,7 @@ type ToastItem = { id: number; message: string; type: ToastType }
 
 type LoginResponse = { token: string; user: AppUser }
 
-const MAIN_ROUTES = ['/stats', '/customers', '/products', '/material-groups', '/unit-weight-options', '/items', '/plans']
+const MAIN_ROUTES = ['/stats', '/customers', '/products', '/material-groups', '/unit-weight-options', '/items', '/raw-material-prices', '/processing-prices', '/plans']
 
 export default function App() {
   const navigate = useNavigate()
@@ -30,6 +32,7 @@ export default function App() {
   const [lang, setLang] = useState<Lang>((localStorage.getItem('lang') as Lang) || 'vi')
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(localStorage.getItem('sidebar_collapsed') === '1')
   const [materialMenuOpen, setMaterialMenuOpen] = useState(true)
+  const [quotationMenuOpen, setQuotationMenuOpen] = useState(true)
   const [username, setUsername] = useState('admin')
   const [password, setPassword] = useState('123456')
   const [error, setError] = useState('')
@@ -276,6 +279,7 @@ export default function App() {
   const avatarFallback = (me?.full_name || me?.username || 'U').slice(0, 1).toUpperCase()
   const isProductsSection = pathname.startsWith('/products')
   const isMaterialSection = pathname === '/material-groups' || pathname === '/unit-weight-options'
+  const isQuotationSection = pathname === '/raw-material-prices' || pathname === '/processing-prices'
 
   return (
     <>
@@ -374,6 +378,31 @@ export default function App() {
                   <span className="side-label">{tr('tabPlans')}</span>
                   {nearEtdPlanCount > 0 ? <span className="side-count-badge">({nearEtdPlanCount})</span> : null}
                 </button>
+                <button
+                  className={`side-btn ${isQuotationSection ? 'active' : ''}`}
+                  type="button"
+                  onClick={() => {
+                    if (sidebarCollapsed) {
+                      navigate('/raw-material-prices')
+                    } else {
+                      setQuotationMenuOpen((v) => !v)
+                    }
+                  }}
+                >
+                  <Coins size={15} />
+                  <span className="side-label">{tr('tabQuotation')}</span>
+                  <ChevronDown size={14} className={`side-chevron ${quotationMenuOpen ? 'open' : ''}`} />
+                </button>
+                {!sidebarCollapsed && quotationMenuOpen ? (
+                  <div className="side-submenu">
+                    <button className={`side-sub-btn ${pathname === '/raw-material-prices' ? 'active' : ''}`} type="button" onClick={() => navigate('/raw-material-prices')}>
+                      {tr('tabRawMaterialPrices')}
+                    </button>
+                    <button className={`side-sub-btn ${pathname === '/processing-prices' ? 'active' : ''}`} type="button" onClick={() => navigate('/processing-prices')}>
+                      {tr('tabProcessingPrices')}
+                    </button>
+                  </div>
+                ) : null}
               </nav>
             </aside>
             <div className="content-area">
@@ -383,6 +412,8 @@ export default function App() {
               {pathname === '/material-groups' ? <MaterialGroupsPage token={token} notify={pushToast} t={tr} /> : null}
               {pathname === '/unit-weight-options' ? <UnitWeightOptionsPage token={token} notify={pushToast} t={tr} /> : null}
               {pathname === '/items' ? <ItemsPage token={token} notify={pushToast} t={tr} /> : null}
+              {pathname === '/raw-material-prices' ? <RawMaterialPricesPage token={token} notify={pushToast} t={tr} /> : null}
+              {pathname === '/processing-prices' ? <ProcessingPricesPage token={token} notify={pushToast} t={tr} /> : null}
               {pathname === '/plans' ? <ProductionPlanPage token={token} notify={pushToast} t={tr} onPlansChanged={refreshNearEtdPlanCount} /> : null}
             </div>
           </div>

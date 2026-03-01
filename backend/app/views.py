@@ -25,6 +25,8 @@ from .db import engine, get_session
 from .models import (
     Customer,
     Item,
+    ProcessingPrice,
+    RawMaterialPrice,
     MaterialGroup,
     UnitWeightOption,
     Product,
@@ -620,6 +622,77 @@ def _ensure_production_plan_note_column() -> None:
             conn.execute(text("ALTER TABLE production_plans ADD COLUMN note TEXT"))
 
 
+def _ensure_raw_material_prices_table() -> None:
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS raw_material_prices (
+                    id INTEGER NOT NULL PRIMARY KEY,
+                    material_name VARCHAR(100) NOT NULL UNIQUE,
+                    unit VARCHAR(30) NOT NULL DEFAULT 'kg',
+                    unit_price NUMERIC(12,4) NOT NULL DEFAULT 0,
+                    deleted_at DATETIME,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_raw_material_prices_material_name ON raw_material_prices (material_name)"))
+        defaults = [
+            ("TB", "kg", 0.85),
+            ("PP", "kg", 1.00),
+            ("HDPE", "kg", 1.10),
+            ("LDPE", "kg", 1.40),
+            ("LLDPE", "kg", 1.50),
+        ]
+        for name, unit, price in defaults:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO raw_material_prices (material_name, unit, unit_price, created_at, updated_at)
+                    SELECT :name, :unit, :price, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM raw_material_prices WHERE material_name = :name
+                    )
+                    """
+                ),
+                {"name": name, "unit": unit, "price": price},
+            )
+
+
+def _ensure_processing_prices_table() -> None:
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS processing_prices (
+                    id INTEGER NOT NULL PRIMARY KEY,
+                    process_name VARCHAR(100) NOT NULL UNIQUE,
+                    unit_price NUMERIC(12,4) NOT NULL DEFAULT 0,
+                    note TEXT,
+                    deleted_at DATETIME,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_processing_prices_process_name ON processing_prices (process_name)"))
+        conn.execute(
+            text(
+                """
+                INSERT INTO processing_prices (process_name, unit_price, note, created_at, updated_at)
+                SELECT 'Gia công', 1.0, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM processing_prices WHERE process_name = 'Gia công'
+                )
+                """
+            )
+        )
+
+
 def serialize_user(u: User):
     return {
         "id": u.id,
@@ -689,6 +762,28 @@ def serialize_item(i: Item):
         "item_size_source_field": i.item_size_source_field,
         "created_at": fmt_datetime(i.created_at),
         "updated_at": fmt_datetime(i.updated_at),
+    }
+
+
+def serialize_raw_material_price(r: RawMaterialPrice):
+    return {
+        "id": r.id,
+        "material_name": r.material_name,
+        "unit": r.unit,
+        "unit_price": to_num(r.unit_price),
+        "created_at": fmt_datetime(r.created_at),
+        "updated_at": fmt_datetime(r.updated_at),
+    }
+
+
+def serialize_processing_price(r: ProcessingPrice):
+    return {
+        "id": r.id,
+        "process_name": r.process_name,
+        "unit_price": to_num(r.unit_price),
+        "note": r.note,
+        "created_at": fmt_datetime(r.created_at),
+        "updated_at": fmt_datetime(r.updated_at),
     }
 
 
@@ -943,7 +1038,7 @@ def _apply_form_product_sheet(
     ws["A10"] = "Item"
     ws["B10"] = "Spec"
     ws["C10"] = "Color"
-    ws["D10"] = "Thông tin"
+    ws["D10"] = "Item Size"
     ws["A20"] = f"Other : {product.other_note or ''}".strip()
 
     # In template Form_Product, range E2:J19 is merged for print preview blocks.
@@ -961,15 +1056,7 @@ def _apply_form_product_sheet(
         ws.cell(row=row_no, column=1, value=spec.item.item_name if spec.item else "")
         ws.cell(row=row_no, column=2, value=spec.spec or "")
         ws.cell(row=row_no, column=3, value=spec.item_color or "")
-        detail_parts = [
-            f"Lami: {spec.lami or '-'}",
-            f"Size: {spec.item_size or '-'}",
-            f"PCS: {_format_decimal_text(spec.pcs_ea) or '-'}",
-            f"UW: {_format_decimal_text(spec.unit_weight_kg) or '-'}",
-            f"Qty: {_format_decimal_text(spec.qty_m_or_m2) or '-'}",
-            f"WT: {_format_decimal_text(spec.wt_kg) or '-'}",
-        ]
-        ws.cell(row=row_no, column=4, value=" | ".join(detail_parts))
+        ws.cell(row=row_no, column=4, value=spec.item_size or "")
 
     # Print 1 / Print 2 preview images
     try:
@@ -1964,6 +2051,180 @@ def item_detail(request: HttpRequest, item_id: int):
             session.add(item)
             session.flush()
             return _ok({"success": True})
+    return _ok({"detail": "Method not allowed"}, 405)
+
+
+@csrf_exempt
+@require_auth
+def raw_material_prices(request: HttpRequest):
+    _ensure_raw_material_prices_table()
+    with get_session() as session:
+        if request.method == "GET":
+            search = (request.GET.get("search") or "").strip()
+            q = select(RawMaterialPrice).where(_active(RawMaterialPrice))
+            if search:
+                q = q.where(RawMaterialPrice.material_name.ilike(f"%{search}%"))
+            rows = session.scalars(q.order_by(RawMaterialPrice.material_name.asc())).all()
+            return _ok([serialize_raw_material_price(r) for r in rows])
+
+        if request.method == "POST":
+            body = _body(request)
+            material_name = _str_or_none(body.get("material_name"))
+            unit = _str_or_none(body.get("unit")) or "kg"
+            unit_price = _normalize_number_text(body.get("unit_price"))
+            if not material_name:
+                return _ok({"detail": "Thiếu material_name"}, 400)
+            if unit_price is None:
+                return _ok({"detail": "Đơn giá phải là số"}, 400)
+
+            existing = session.scalar(select(RawMaterialPrice).where(RawMaterialPrice.material_name == material_name))
+            if existing and existing.deleted_at is None:
+                return _ok({"detail": "Nguyên liệu đã tồn tại"}, 400)
+            if existing and existing.deleted_at is not None:
+                existing.deleted_at = None
+                existing.unit = unit
+                existing.unit_price = unit_price
+                session.add(existing)
+                session.flush()
+                return _ok(serialize_raw_material_price(existing))
+
+            row = RawMaterialPrice(material_name=material_name, unit=unit, unit_price=unit_price)
+            session.add(row)
+            session.flush()
+            return _ok(serialize_raw_material_price(row), 201)
+
+    return _ok({"detail": "Method not allowed"}, 405)
+
+
+@csrf_exempt
+@require_auth
+def raw_material_price_detail(request: HttpRequest, item_id: int):
+    _ensure_raw_material_prices_table()
+    with get_session() as session:
+        row = session.scalar(select(RawMaterialPrice).where(RawMaterialPrice.id == item_id, _active(RawMaterialPrice)))
+        if not row:
+            return _ok({"detail": "Not found"}, 404)
+
+        if request.method == "PUT":
+            body = _body(request)
+            material_name = _str_or_none(body.get("material_name"))
+            unit = _str_or_none(body.get("unit")) or "kg"
+            unit_price = _normalize_number_text(body.get("unit_price"))
+            if not material_name:
+                return _ok({"detail": "Thiếu material_name"}, 400)
+            if unit_price is None:
+                return _ok({"detail": "Đơn giá phải là số"}, 400)
+
+            dup = session.scalar(
+                select(RawMaterialPrice).where(
+                    RawMaterialPrice.material_name == material_name,
+                    RawMaterialPrice.id != row.id,
+                    _active(RawMaterialPrice),
+                )
+            )
+            if dup:
+                return _ok({"detail": "Nguyên liệu đã tồn tại"}, 400)
+
+            row.material_name = material_name
+            row.unit = unit
+            row.unit_price = unit_price
+            session.add(row)
+            session.flush()
+            return _ok(serialize_raw_material_price(row))
+
+        if request.method == "DELETE":
+            row.deleted_at = _now()
+            session.add(row)
+            session.flush()
+            return _ok({"success": True})
+
+    return _ok({"detail": "Method not allowed"}, 405)
+
+
+@csrf_exempt
+@require_auth
+def processing_prices(request: HttpRequest):
+    _ensure_processing_prices_table()
+    with get_session() as session:
+        if request.method == "GET":
+            search = (request.GET.get("search") or "").strip()
+            q = select(ProcessingPrice).where(_active(ProcessingPrice))
+            if search:
+                q = q.where(ProcessingPrice.process_name.ilike(f"%{search}%"))
+            rows = session.scalars(q.order_by(ProcessingPrice.process_name.asc())).all()
+            return _ok([serialize_processing_price(r) for r in rows])
+
+        if request.method == "POST":
+            body = _body(request)
+            process_name = _str_or_none(body.get("process_name"))
+            unit_price = _normalize_number_text(body.get("unit_price"))
+            note = _str_or_none(body.get("note"))
+            if not process_name:
+                return _ok({"detail": "Thiếu process_name"}, 400)
+            if unit_price is None:
+                return _ok({"detail": "Đơn giá phải là số"}, 400)
+
+            existing = session.scalar(select(ProcessingPrice).where(ProcessingPrice.process_name == process_name))
+            if existing and existing.deleted_at is None:
+                return _ok({"detail": "Hạng mục gia công đã tồn tại"}, 400)
+            if existing and existing.deleted_at is not None:
+                existing.deleted_at = None
+                existing.unit_price = unit_price
+                existing.note = note
+                session.add(existing)
+                session.flush()
+                return _ok(serialize_processing_price(existing))
+
+            row = ProcessingPrice(process_name=process_name, unit_price=unit_price, note=note)
+            session.add(row)
+            session.flush()
+            return _ok(serialize_processing_price(row), 201)
+
+    return _ok({"detail": "Method not allowed"}, 405)
+
+
+@csrf_exempt
+@require_auth
+def processing_price_detail(request: HttpRequest, item_id: int):
+    _ensure_processing_prices_table()
+    with get_session() as session:
+        row = session.scalar(select(ProcessingPrice).where(ProcessingPrice.id == item_id, _active(ProcessingPrice)))
+        if not row:
+            return _ok({"detail": "Not found"}, 404)
+
+        if request.method == "PUT":
+            body = _body(request)
+            process_name = _str_or_none(body.get("process_name"))
+            unit_price = _normalize_number_text(body.get("unit_price"))
+            note = _str_or_none(body.get("note"))
+            if not process_name:
+                return _ok({"detail": "Thiếu process_name"}, 400)
+            if unit_price is None:
+                return _ok({"detail": "Đơn giá phải là số"}, 400)
+
+            dup = session.scalar(
+                select(ProcessingPrice).where(
+                    ProcessingPrice.process_name == process_name,
+                    ProcessingPrice.id != row.id,
+                    _active(ProcessingPrice),
+                )
+            )
+            if dup:
+                return _ok({"detail": "Hạng mục gia công đã tồn tại"}, 400)
+
+            row.process_name = process_name
+            row.unit_price = unit_price
+            row.note = note
+            session.add(row)
+            session.flush()
+            return _ok(serialize_processing_price(row))
+
+        if request.method == "DELETE":
+            row.deleted_at = _now()
+            session.add(row)
+            session.flush()
+            return _ok({"success": True})
+
     return _ok({"detail": "Method not allowed"}, 405)
 
 

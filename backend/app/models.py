@@ -108,6 +108,30 @@ class Item(Base):
     updated_at: Mapped[str] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
 
+class RawMaterialPrice(Base):
+    __tablename__ = "raw_material_prices"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    material_name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    unit: Mapped[str] = mapped_column(String(30), nullable=False, default="kg")
+    unit_price: Mapped[float] = mapped_column(Numeric(12, 4), nullable=False, default=0)
+    deleted_at: Mapped[str | None] = mapped_column(DateTime)
+    created_at: Mapped[str] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[str] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class ProcessingPrice(Base):
+    __tablename__ = "processing_prices"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    process_name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    unit_price: Mapped[float] = mapped_column(Numeric(12, 4), nullable=False, default=0)
+    note: Mapped[str | None] = mapped_column(Text)
+    deleted_at: Mapped[str | None] = mapped_column(DateTime)
+    created_at: Mapped[str] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[str] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
 class MaterialGroup(Base):
     __tablename__ = "material_groups"
 

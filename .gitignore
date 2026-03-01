@@ -46,3 +46,24 @@ backend/build/
 backend/dist/
 backend/*.spec
 frontend/tsconfig.tsbuildinfo
+
+# Keep DB + media snapshots in git (private repo use-case)
+!backend/data/app.db
+!backend/media/
+!backend/media/**
+
+# Keep only release data/media (not executables/logs)
+!releases/
+releases/*
+!releases/linux/
+!releases/windows/
+releases/linux/*
+!releases/linux/data/
+!releases/linux/media/
+!releases/linux/data/**
+!releases/linux/media/**
+releases/windows/*
+!releases/windows/data/
+!releases/windows/media/
+!releases/windows/data/**
+!releases/windows/media/**

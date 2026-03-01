@@ -546,6 +546,22 @@ textarea:focus {
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.14);
 }
 
+.input-postfix-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.input-postfix-wrap input {
+  flex: 1;
+}
+
+.input-postfix-wrap span {
+  min-width: 18px;
+  color: #475569;
+  font-weight: 600;
+}
+
 /* react-select */
 .select2__control {
   min-height: 38px !important;

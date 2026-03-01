@@ -16,7 +16,7 @@ from sqlalchemy import select, text
 django.setup()
 
 from app.db import Base, engine, get_session
-from app.models import Item, UnitWeightOption, User
+from app.models import Item, ProcessingPrice, RawMaterialPrice, UnitWeightOption, User
 
 
 DEFAULT_ITEMS = [
@@ -78,6 +78,18 @@ DEFAULT_UNIT_WEIGHT_OPTIONS = [
     ("Spec đai", "10mm 60gr", 0.06),
 ]
 
+DEFAULT_RAW_MATERIAL_PRICES = [
+    ("TB", "kg", 0.85),
+    ("PP", "kg", 1.00),
+    ("HDPE", "kg", 1.10),
+    ("LDPE", "kg", 1.40),
+    ("LLDPE", "kg", 1.50),
+]
+
+DEFAULT_PROCESSING_PRICES = [
+    ("Gia công", 1.00, None),
+]
+
 
 def ensure_soft_delete_columns() -> None:
     tables = [
@@ -85,6 +97,8 @@ def ensure_soft_delete_columns() -> None:
         "customers",
         "products",
         "items",
+        "raw_material_prices",
+        "processing_prices",
         "material_groups",
         "unit_weight_options",
         "product_specs",
@@ -478,6 +492,30 @@ def main() -> None:
             if (group, label) not in existing_options:
                 session.add(UnitWeightOption(option_group=group, option_label=label, unit_weight_value=value))
         print("Ensured default unit weight options list")
+
+        existing_materials = {
+            name
+            for name in session.scalars(
+                select(RawMaterialPrice.material_name).where(RawMaterialPrice.deleted_at.is_(None))
+            ).all()
+            if name
+        }
+        for material_name, unit, unit_price in DEFAULT_RAW_MATERIAL_PRICES:
+            if material_name not in existing_materials:
+                session.add(RawMaterialPrice(material_name=material_name, unit=unit, unit_price=unit_price))
+        print("Ensured default raw material prices list")
+
+        existing_processing = {
+            name
+            for name in session.scalars(
+                select(ProcessingPrice.process_name).where(ProcessingPrice.deleted_at.is_(None))
+            ).all()
+            if name
+        }
+        for process_name, unit_price, note in DEFAULT_PROCESSING_PRICES:
+            if process_name not in existing_processing:
+                session.add(ProcessingPrice(process_name=process_name, unit_price=unit_price, note=note))
+        print("Ensured default processing prices list")
 
 
 if __name__ == "__main__":

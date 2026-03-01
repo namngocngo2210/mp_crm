@@ -131,6 +131,22 @@ export type Item = {
   updated_at?: string
 }
 
+export type RawMaterialPrice = {
+  id: number
+  material_name: string
+  unit: string
+  unit_price: number
+  updated_at?: string
+}
+
+export type ProcessingPrice = {
+  id: number
+  process_name: string
+  unit_price: number
+  note?: string
+  updated_at?: string
+}
+
 export type AppUser = {
   id: number
   username: string
