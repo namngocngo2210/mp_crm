@@ -7,7 +7,12 @@ import { I18nKey } from '../lib/i18n'
 import ConfirmModal from '../components/ConfirmModal'
 import FormModal from '../components/FormModal'
 
-type Props = { token: string; notify: (message: string, type: 'success' | 'error') => void; t: (key: I18nKey) => string }
+type Props = {
+  token: string
+  notify: (message: string, type: 'success' | 'error') => void
+  t: (key: I18nKey) => string
+  onPlansChanged?: () => void
+}
 type Option = { value: number; label: string }
 
 const initForm = {
@@ -18,10 +23,17 @@ const initForm = {
   eta: '',
   contp_date: '',
   order_qty_pcs: '0',
+  spec_inner_snapshot: '',
+  liner_snapshot: '',
+  print_snapshot: '',
+  label: '',
+  sewing_type: '',
+  packing: '',
+  note: '',
   status: 'draft',
 }
 
-export default function ProductionPlanPage({ token, notify, t }: Props) {
+export default function ProductionPlanPage({ token, notify, t, onPlansChanged }: Props) {
   const PAGE_SIZE_OPTIONS = [5, 10]
   const [customers, setCustomers] = useState<Customer[]>([])
   const [products, setProducts] = useState<Product[]>([])
@@ -37,6 +49,41 @@ export default function ProductionPlanPage({ token, notify, t }: Props) {
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(10)
   const firstSearchRunRef = useRef(true)
+
+  const toInputDate = (value?: string) => {
+    if (!value) return ''
+    const m = /^(\d{2})-(\d{2})-(\d{4})$/.exec(value.trim())
+    if (!m) return ''
+    return `${m[3]}-${m[2]}-${m[1]}`
+  }
+
+  const fromInputDate = (value?: string) => {
+    if (!value) return ''
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim())
+    if (!m) return value || ''
+    return `${m[3]}-${m[2]}-${m[1]}`
+  }
+
+  const parseDmyDate = (value?: string) => {
+    if (!value) return null
+    const m = /^(\d{2})-(\d{2})-(\d{4})$/.exec(value.trim())
+    if (!m) return null
+    const d = Number(m[1])
+    const mo = Number(m[2]) - 1
+    const y = Number(m[3])
+    const dt = new Date(y, mo, d)
+    if (Number.isNaN(dt.getTime())) return null
+    return dt
+  }
+
+  const isEtdWithin5Days = (value?: string) => {
+    const etdDate = parseDmyDate(value)
+    if (!etdDate) return false
+    const now = new Date()
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+    const diffDays = Math.floor((etdDate.getTime() - today.getTime()) / 86400000)
+    return diffDays >= 0 && diffDays <= 5
+  }
 
   const customerOptions: Option[] = customers.map((c) => ({
     value: c.id,
@@ -55,6 +102,18 @@ export default function ProductionPlanPage({ token, notify, t }: Props) {
 
   const selectedCustomer = customerOptions.find((o) => String(o.value) === form.customer_id) || null
   const selectedProduct = productOptions.find((o) => String(o.value) === form.product_id) || null
+  const selectedProductData = useMemo(
+    () => products.find((p) => p.id === Number(form.product_id)) || null,
+    [products, form.product_id],
+  )
+  const customerNameById = useMemo(
+    () => new Map(customers.map((c) => [c.id, c.customer_name || c.customer_code || String(c.id)])),
+    [customers],
+  )
+  const productNameById = useMemo(
+    () => new Map(products.map((p) => [p.id, p.product_name || p.product_code || String(p.id)])),
+    [products],
+  )
 
   const load = async () => {
     const [cus, prod, plans] = await Promise.all([
@@ -88,12 +147,28 @@ export default function ProductionPlanPage({ token, notify, t }: Props) {
     setSelectedIds((prev) => new Set([...prev].filter((id) => valid.has(id))))
   }, [rows])
 
+  useEffect(() => {
+    if (!selectedProductData) return
+    setForm((prev) => ({
+      ...prev,
+      spec_inner_snapshot: selectedProductData.spec_inner || '',
+      liner_snapshot: selectedProductData.liner || '',
+      print_snapshot: selectedProductData.print || '',
+      label: selectedProductData.product_name || '',
+      sewing_type: selectedProductData.sewing_type || '',
+      packing: selectedProductData.packing || '',
+    }))
+  }, [selectedProductData])
+
   const submit = async (e: FormEvent) => {
     e.preventDefault()
     setError('')
     try {
       const payload = {
         ...form,
+        etd: fromInputDate(form.etd),
+        eta: fromInputDate(form.eta),
+        contp_date: fromInputDate(form.contp_date),
         customer_id: Number(form.customer_id),
         product_id: Number(form.product_id),
         order_qty_pcs: Number(form.order_qty_pcs),
@@ -107,6 +182,7 @@ export default function ProductionPlanPage({ token, notify, t }: Props) {
       setShowForm(false)
       setEditingId(null)
       await load()
+      onPlansChanged?.()
       notify(t(editingId ? 'planUpdated' : 'planCreated'), 'success')
     } catch (err) {
       const message = (err as Error).message
@@ -120,10 +196,17 @@ export default function ProductionPlanPage({ token, notify, t }: Props) {
       customer_id: String(item.customer_id),
       product_id: String(item.product_id),
       lot_no: item.lot_no || '',
-      etd: item.etd || '',
-      eta: item.eta || '',
-      contp_date: item.contp_date || '',
+      etd: toInputDate(item.etd),
+      eta: toInputDate(item.eta),
+      contp_date: toInputDate(item.contp_date),
       order_qty_pcs: String(item.order_qty_pcs ?? 0),
+      spec_inner_snapshot: item.spec_inner_snapshot || '',
+      liner_snapshot: item.liner_snapshot || '',
+      print_snapshot: item.print_snapshot || '',
+      label: item.label || '',
+      sewing_type: item.sewing_type || '',
+      packing: item.packing || '',
+      note: item.note || '',
       status: item.status || 'draft',
     })
     setError('')
@@ -136,6 +219,7 @@ export default function ProductionPlanPage({ token, notify, t }: Props) {
     try {
       await api(`/api/production-plans/${pendingDelete.id}`, 'DELETE', undefined, token)
       await load()
+      onPlansChanged?.()
       notify(t('planDeleted'), 'success')
       setPendingDelete(null)
     } catch (err) {
@@ -166,6 +250,7 @@ export default function ProductionPlanPage({ token, notify, t }: Props) {
       setSelectedIds(new Set())
       setShowBulkDeleteConfirm(false)
       await load()
+      onPlansChanged?.()
     } catch (err) {
       notify((err as Error).message, 'error')
     }
@@ -219,26 +304,38 @@ export default function ProductionPlanPage({ token, notify, t }: Props) {
             <tr>
               <th><input type="checkbox" checked={allPageSelected} onChange={(e) => toggleSelectAllPage(e.target.checked)} /></th>
               <th>{t('colLot')}</th>
-              <th>{t('colCustomerId')}</th>
-              <th>{t('colProductId')}</th>
+              <th>{t('colCustomerName')}</th>
+              <th>{t('colProductName')}</th>
               <th>{t('colEtd')}</th>
               <th>{t('colEta')}</th>
               <th>{t('colOrderQtyPcs')}</th>
+              <th>{t('lblSpecInner')}</th>
+              <th>{t('lblLiner')}</th>
+              <th>{t('lblPrint')}</th>
+              <th>{t('colProductName')}</th>
+              <th>{t('lblSewingType')}</th>
+              <th>{t('lblPacking')}</th>
               <th>{t('colStatus')}</th>
               <th>{t('colUpdatedAt')}</th>
               <th>{t('actions')}</th>
             </tr>
           </thead>
           <tbody>
-            {pagedRows.length > 0 ? pagedRows.map((r) => (
-              <tr key={r.id}>
+            {pagedRows.length > 0 ? pagedRows.flatMap((r) => ([
+              <tr key={`${r.id}-main`} className={isEtdWithin5Days(r.etd) ? 'plan-warning-row' : ''}>
                 <td><input type="checkbox" checked={selectedIds.has(r.id)} onChange={(e) => toggleSelectRow(r.id, e.target.checked)} /></td>
                 <td>{r.lot_no}</td>
-                <td>{r.customer_id}</td>
-                <td>{r.product_id}</td>
+                <td>{customerNameById.get(r.customer_id) || r.customer_id}</td>
+                <td>{productNameById.get(r.product_id) || r.product_id}</td>
                 <td>{r.etd}</td>
                 <td>{r.eta}</td>
                 <td>{r.order_qty_pcs}</td>
+                <td>{r.spec_inner_snapshot || '-'}</td>
+                <td>{r.liner_snapshot || '-'}</td>
+                <td>{r.print_snapshot || '-'}</td>
+                <td>{r.label || '-'}</td>
+                <td>{r.sewing_type || '-'}</td>
+                <td>{r.packing || '-'}</td>
                 <td>{r.status}</td>
                 <td>{r.updated_at}</td>
                 <td>
@@ -247,9 +344,18 @@ export default function ProductionPlanPage({ token, notify, t }: Props) {
                     <button type="button" className="danger-light icon-btn" title={t('delete')} aria-label={t('delete')} onClick={() => setPendingDelete(r)}><Trash2 size={14} /></button>
                   </div>
                 </td>
-              </tr>
-            )) : (
-              <tr><td className="empty-cell" colSpan={10}>{t('noData')}</td></tr>
+              </tr>,
+              <tr className={`spec-note-row ${isEtdWithin5Days(r.etd) ? 'plan-warning-row' : ''}`} key={`${r.id}-note`}>
+                <td colSpan={5}>
+                  <div className="spec-note-wrap">
+                    <span>{t('lblOtherNote')}:</span>
+                    <span>{r.note || '-'}</span>
+                  </div>
+                </td>
+                <td colSpan={11} />
+              </tr>,
+            ])) : (
+              <tr><td className="empty-cell" colSpan={16}>{t('noData')}</td></tr>
             )}
           </tbody>
         </table>
@@ -305,7 +411,18 @@ export default function ProductionPlanPage({ token, notify, t }: Props) {
                 classNamePrefix="select2"
                 options={customerOptions}
                 value={selectedCustomer}
-                onChange={(opt: Option | null) => setForm({ ...form, customer_id: opt ? String(opt.value) : '', product_id: '' })}
+                onChange={(opt: Option | null) => setForm({
+                  ...form,
+                  customer_id: opt ? String(opt.value) : '',
+                  product_id: '',
+                  spec_inner_snapshot: '',
+                  liner_snapshot: '',
+                  print_snapshot: '',
+                  label: '',
+                  sewing_type: '',
+                  packing: '',
+                  note: '',
+                })}
                 placeholder={t('phSelectCustomer')}
                 isClearable
               />
@@ -323,9 +440,9 @@ export default function ProductionPlanPage({ token, notify, t }: Props) {
             </div>
             <div className="form-field"><label>{t('lblLot')}</label><input placeholder={t('phLot')} value={form.lot_no} onChange={(e) => setForm({ ...form, lot_no: e.target.value })} required /></div>
             <div className="form-field"><label>{t('lblOrderQtyPcs')}</label><input placeholder={t('phOrderQtyPcs')} type="number" value={form.order_qty_pcs} onChange={(e) => setForm({ ...form, order_qty_pcs: e.target.value })} required /></div>
-            <div className="form-field"><label>{t('lblEtd')}</label><input placeholder={t('phEtd')} value={form.etd} onChange={(e) => setForm({ ...form, etd: e.target.value })} /></div>
-            <div className="form-field"><label>{t('lblEta')}</label><input placeholder={t('phEta')} value={form.eta} onChange={(e) => setForm({ ...form, eta: e.target.value })} /></div>
-            <div className="form-field"><label>{t('lblContpDate')}</label><input placeholder={t('phContpDate')} value={form.contp_date} onChange={(e) => setForm({ ...form, contp_date: e.target.value })} /></div>
+            <div className="form-field"><label>{t('lblEtd')}</label><input type="date" lang="en-GB" value={form.etd} onChange={(e) => setForm({ ...form, etd: e.target.value })} /></div>
+            <div className="form-field"><label>{t('lblEta')}</label><input type="date" lang="en-GB" value={form.eta} onChange={(e) => setForm({ ...form, eta: e.target.value })} /></div>
+            <div className="form-field"><label>{t('lblContpDate')}</label><input type="date" lang="en-GB" value={form.contp_date} onChange={(e) => setForm({ ...form, contp_date: e.target.value })} /></div>
             <div className="form-field">
               <label>{t('lblStatus')}</label>
               <select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}>
@@ -336,6 +453,13 @@ export default function ProductionPlanPage({ token, notify, t }: Props) {
                 <option value="cancelled">cancelled</option>
               </select>
             </div>
+            <div className="form-field"><label>{t('lblSpecInner')}</label><input value={form.spec_inner_snapshot} onChange={(e) => setForm({ ...form, spec_inner_snapshot: e.target.value })} /></div>
+            <div className="form-field"><label>{t('lblLiner')}</label><input value={form.liner_snapshot} onChange={(e) => setForm({ ...form, liner_snapshot: e.target.value })} /></div>
+            <div className="form-field"><label>{t('lblPrint')}</label><input value={form.print_snapshot} onChange={(e) => setForm({ ...form, print_snapshot: e.target.value })} /></div>
+            <div className="form-field"><label>{t('colProductName')}</label><input value={form.label} onChange={(e) => setForm({ ...form, label: e.target.value })} /></div>
+            <div className="form-field"><label>{t('lblSewingType')}</label><input value={form.sewing_type} onChange={(e) => setForm({ ...form, sewing_type: e.target.value })} /></div>
+            <div className="form-field"><label>{t('lblPacking')}</label><input value={form.packing} onChange={(e) => setForm({ ...form, packing: e.target.value })} /></div>
+            <div className="form-field"><label>{t('lblOtherNote')}</label><input placeholder={t('phOtherNote')} value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} /></div>
           </div>
           {error ? <div className="error">{error}</div> : null}
           <div className="row form-actions">

@@ -12,9 +12,17 @@ export async function api<T>(path: string, method: HttpMethod = 'GET', body?: un
     body: body ? (body instanceof FormData ? body : JSON.stringify(body)) : undefined,
   })
 
-  const data = await res.json().catch(() => ({}))
+  const rawText = await res.text()
+  let data: Record<string, unknown> = {}
+  try {
+    data = rawText ? (JSON.parse(rawText) as Record<string, unknown>) : {}
+  } catch {
+    data = {}
+  }
   if (!res.ok) {
-    throw new Error(data.detail || 'Request failed')
+    const detail = typeof data.detail === 'string' ? data.detail : undefined
+    const fallback = rawText?.trim() ? rawText.trim().slice(0, 300) : `HTTP ${res.status}`
+    throw new Error(detail || fallback || 'Request failed')
   }
   return data as T
 }

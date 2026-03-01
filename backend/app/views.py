@@ -2,22 +2,26 @@ from __future__ import annotations
 
 import ast
 import json
+import mimetypes
 import os
 import re
 import uuid
 import zipfile
+from io import BytesIO
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 from xml.etree import ElementTree as ET
 
 from django.conf import settings
 from django.contrib.auth.hashers import check_password, make_password
-from django.http import HttpRequest, JsonResponse
+from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
+from sqlalchemy.exc import IntegrityError
 
 from .auth import login_with_username_password, require_auth
-from .db import get_session
+from .db import engine, get_session
 from .models import (
     Customer,
     Item,
@@ -145,6 +149,73 @@ def _parse_spec_abc(v: str | None):
     except (TypeError, ValueError):
         return None
     return {"a_text": parts[0], "a_num": a_num, "b": b, "c": c}
+
+
+def _parse_spec_parts(v: str | None, expected_parts: int):
+    text = _str_or_none(v)
+    if not text:
+        return None
+    parts = [p.strip() for p in text.split("*")]
+    if len(parts) != expected_parts:
+        return None
+    values: list[float] = []
+    for part in parts:
+        m = A_NUMBER_PATTERN.search(part or "")
+        if not m:
+            return None
+        try:
+            values.append(float(m.group(0)))
+        except (TypeError, ValueError):
+            return None
+    vars_map: dict[str, float] = {}
+    if expected_parts >= 1:
+        vars_map["A"] = values[0]
+    if expected_parts >= 2:
+        vars_map["B"] = values[1]
+    if expected_parts >= 3:
+        vars_map["C"] = values[2]
+    return vars_map
+
+
+def _split_pair_formula(expr: str | None):
+    text = _str_or_none(expr)
+    if text is None:
+        return None
+    depth = 0
+    for i, ch in enumerate(text):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth < 0:
+                return None
+        elif ch == "*" and depth == 0:
+            left = text[:i].strip()
+            right = text[i + 1 :].strip()
+            if not left or not right:
+                return None
+            return left, right
+    return None
+
+
+def _format_num_text(v: float):
+    fixed = f"{v:.6f}"
+    trimmed = fixed.rstrip("0").rstrip(".")
+    return "0" if trimmed in {"", "-0"} else trimmed
+
+
+def _normalize_ab_text(v: str | None):
+    text = _str_or_none(v)
+    if text is None:
+        return None
+    parts = [p.strip() for p in text.split("*")]
+    if len(parts) != 2:
+        return None
+    a = A_NUMBER_PATTERN.search(parts[0] or "")
+    b = A_NUMBER_PATTERN.search(parts[1] or "")
+    if not a or not b:
+        return None
+    return f"{_format_num_text(float(a.group(0)))}*{_format_num_text(float(b.group(0)))}"
 
 
 def _validate_formula_expr(expr: str | None) -> str | None:
@@ -277,6 +348,159 @@ def _compute_unit_weight(
     return result
 
 
+def _compute_item_size(
+    mode: str | None,
+    fixed_type: str | None,
+    fixed_value,
+    fixed_text: str | None,
+    formula_expr: str | None,
+    source_value: str | None,
+    source_field: str | None = None,
+):
+    normalized_mode = (mode or "fixed").strip().lower()
+    if normalized_mode == "fixed":
+        normalized_fixed_type = (fixed_type or "number").strip().lower()
+        if normalized_fixed_type == "ab":
+            return _normalize_ab_text(fixed_text)
+        if fixed_value is None:
+            return None
+        try:
+            return _format_num_text(float(fixed_value))
+        except (TypeError, ValueError):
+            return None
+    if normalized_mode != "formula":
+        return None
+    source = (source_field or "spec_inner").strip().lower()
+    if source == "liner" and not _str_or_none(formula_expr):
+        return _str_or_none(source_value)
+    pair = _split_pair_formula(formula_expr)
+    if not pair:
+        return None
+    left_expr, right_expr = pair
+    left_expr = _validate_formula_expr(left_expr)
+    right_expr = _validate_formula_expr(right_expr)
+    if not left_expr or not right_expr:
+        return None
+    vars_map: dict[str, float] | None = None
+    if source in {"spec_inner", "liner"}:
+        vars_map = _parse_spec_parts(source_value, 3)
+    elif source in {"top", "bottom"}:
+        vars_map = _parse_spec_parts(source_value, 2)
+    if vars_map is None:
+        text = _str_or_none(source_value)
+        if not text:
+            return None
+        first_num = A_NUMBER_PATTERN.search(text)
+        if not first_num:
+            return None
+        try:
+            vars_map = {"A": float(first_num.group(0))}
+        except (TypeError, ValueError):
+            return None
+    try:
+        left = float(_evaluate_formula_expr(left_expr, vars_map))
+        right = float(_evaluate_formula_expr(right_expr, vars_map))
+        return f"{_format_num_text(left)}*{_format_num_text(right)}"
+    except Exception:
+        return None
+
+
+def _resolve_item_size_source_value(source_field: str | None, product: Product, fallback_spec: str | None):
+    source = (source_field or "spec_inner").strip().lower()
+    if source == "spec_inner":
+        return _str_or_none(product.spec_inner) or _str_or_none(fallback_spec)
+    if source == "top":
+        return _str_or_none(product.top)
+    if source == "bottom":
+        return _str_or_none(product.bottom)
+    if source == "liner":
+        return _str_or_none(product.liner)
+    return _str_or_none(product.spec_inner) or _str_or_none(fallback_spec)
+
+
+def _compute_qty_from_item_size(item_size_value):
+    if item_size_value is None:
+        return None
+    if isinstance(item_size_value, (int, float)):
+        return float(item_size_value)
+    text = _str_or_none(item_size_value)
+    if not text:
+        return None
+    parts = [p.strip() for p in text.split("*")]
+    nums: list[float] = []
+    for p in parts:
+        m = A_NUMBER_PATTERN.search(p or "")
+        if not m:
+            return None
+        try:
+            nums.append(float(m.group(0)))
+        except (TypeError, ValueError):
+            return None
+    if not nums:
+        return None
+    out = 1.0
+    for n in nums:
+        out *= n
+    # Item Size in form A*B is in cm, convert to m2.
+    if len(nums) == 2:
+        out = out / 10000.0
+    return out
+
+
+def _to_float_or_none(v):
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    raw = _str_or_none(v)
+    if raw is None:
+        return None
+    try:
+        return float(raw.replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+
+
+def _compute_wt_kg(unit_weight_kg, qty_m_or_m2, pcs_ea):
+    unit_weight = _to_float_or_none(unit_weight_kg)
+    qty = _to_float_or_none(qty_m_or_m2)
+    pcs = _to_float_or_none(pcs_ea)
+    if unit_weight is None or qty is None or pcs is None:
+        return None
+    return unit_weight * qty * pcs
+
+
+def _next_product_spec_line_no(session, product_id: int) -> int:
+    # Keep line_no unique within a product across all rows, including soft-deleted rows.
+    max_line_no = session.scalar(select(func.max(ProductSpec.line_no)).where(ProductSpec.product_id == product_id)) or 0
+    return int(max_line_no) + 1
+
+
+def _recompute_product_specs_item_size_qty(session, product: Product):
+    specs = session.scalars(
+        select(ProductSpec).where(ProductSpec.product_id == product.id, _active(ProductSpec)).order_by(ProductSpec.id.asc())
+    ).all()
+    if not specs:
+        return
+    for spec in specs:
+        item = session.scalar(select(Item).where(Item.id == spec.item_id, _active(Item)))
+        if not item:
+            continue
+        next_item_size = _compute_item_size(
+            item.item_size_mode,
+            item.item_size_fixed_type,
+            item.item_size_value,
+            item.item_size_value_text,
+            item.item_size_formula_code,
+            _resolve_item_size_source_value(item.item_size_source_field, product, spec.spec),
+            item.item_size_source_field,
+        )
+        spec.item_size = next_item_size
+        spec.qty_m_or_m2 = _compute_qty_from_item_size(next_item_size)
+        spec.wt_kg = _compute_wt_kg(spec.unit_weight_kg, spec.qty_m_or_m2, spec.pcs_ea)
+        session.add(spec)
+
+
 def _xlsx_shared_strings(zf: zipfile.ZipFile) -> list[str]:
     path = "xl/sharedStrings.xml"
     if path not in zf.namelist():
@@ -352,6 +576,27 @@ def _ok(data, status=200):
     return JsonResponse(data, status=status, safe=False)
 
 
+def frontend_app(request: HttpRequest, path: str = ""):
+    dist_dir = Path(settings.FRONTEND_DIST_DIR)
+    if not dist_dir.exists():
+        return HttpResponse("Frontend dist not found", status=404)
+
+    safe_path = (path or "").lstrip("/")
+    requested = (dist_dir / safe_path).resolve()
+    try:
+        requested.relative_to(dist_dir.resolve())
+    except ValueError:
+        return HttpResponse("Invalid path", status=400)
+
+    target = requested if safe_path and requested.exists() and requested.is_file() else (dist_dir / "index.html")
+    if not target.exists():
+        return HttpResponse("index.html not found", status=404)
+
+    ctype, _ = mimetypes.guess_type(str(target))
+    with target.open("rb") as fh:
+        return HttpResponse(fh.read(), content_type=ctype or "text/html")
+
+
 def _now() -> datetime:
     return datetime.now()
 
@@ -366,6 +611,13 @@ def _is_admin(user: User) -> bool:
 
 def _forbidden():
     return _ok({"detail": "Bạn không có quyền thực hiện thao tác này"}, 403)
+
+
+def _ensure_production_plan_note_column() -> None:
+    with engine.begin() as conn:
+        cols = {row[1] for row in conn.execute(text("PRAGMA table_info(production_plans)")).fetchall()}
+        if "note" not in cols:
+            conn.execute(text("ALTER TABLE production_plans ADD COLUMN note TEXT"))
 
 
 def serialize_user(u: User):
@@ -428,12 +680,24 @@ def serialize_item(i: Item):
         "id": i.id,
         "item_name": i.item_name,
         "item_color": i.item_color,
+        "item_size_mode": i.item_size_mode,
+        "item_size_fixed_type": i.item_size_fixed_type,
+        "item_size_value": to_num(i.item_size_value),
+        "item_size_value_text": i.item_size_value_text,
+        "item_size_formula_code": i.item_size_formula_code,
+        "item_size_formula": i.item_size_formula_code,
+        "item_size_source_field": i.item_size_source_field,
         "created_at": fmt_datetime(i.created_at),
         "updated_at": fmt_datetime(i.updated_at),
     }
 
 
 def serialize_spec(s: ProductSpec):
+    computed_qty = _compute_qty_from_item_size(s.item_size)
+    qty_value = computed_qty if computed_qty is not None else to_num(s.qty_m_or_m2)
+    wt_value = _compute_wt_kg(s.unit_weight_kg, qty_value, s.pcs_ea)
+    if wt_value is None:
+        wt_value = to_num(s.wt_kg)
     return {
         "id": s.id,
         "product_id": s.product_id,
@@ -447,9 +711,9 @@ def serialize_spec(s: ProductSpec):
         "lami": s.lami,
         "item_color": s.item_color,
         "unit_weight_kg": to_num(s.unit_weight_kg),
-        "qty_m_or_m2": to_num(s.qty_m_or_m2),
+        "qty_m_or_m2": qty_value,
         "pcs_ea": to_num(s.pcs_ea),
-        "wt_kg": to_num(s.wt_kg),
+        "wt_kg": wt_value,
         "other_note": s.other_note,
         "is_manual_weight": s.is_manual_weight,
         "created_at": fmt_datetime(s.created_at),
@@ -505,6 +769,7 @@ def serialize_plan(p: ProductionPlan):
         "label": p.label,
         "sewing_type": p.sewing_type,
         "packing": p.packing,
+        "note": p.note,
         "status": p.status,
         "update_person": p.update_person,
         "created_at": fmt_datetime(p.created_at),
@@ -576,6 +841,156 @@ def serialize_material_group(mg: MaterialGroup):
         "updated_at": fmt_datetime(mg.updated_at),
     }
 
+
+def _format_decimal_text(v):
+    num = to_num(v)
+    if num is None:
+        return ""
+    text = f"{num:.5f}".rstrip("0").rstrip(".")
+    return text
+
+
+def _apply_form_specification_sheet(ws, product: Product, customer: Customer | None, specs: list[ProductSpec]):
+    ws["C2"] = product.product_name or ""
+    ws["F2"] = customer.customer_code if customer else ""
+    ws["C3"] = product.spec_inner or ""
+    ws["F3"] = fmt_date(product.updated_at) or datetime.now().strftime("%d-%m-%Y")
+    ws["I3"] = ""
+    ws["D4"] = product.top or ""
+    ws["F4"] = product.bottom or ""
+
+    # Keep template rows and replace from row 7 onward.
+    start_row = 7
+    end_row = 21
+    for i, spec in enumerate(specs[: end_row - start_row + 1], start=0):
+        row_no = start_row + i
+        ws.cell(row=row_no, column=1, value=i + 1)
+        ws.cell(row=row_no, column=2, value=spec.item.item_name if spec.item else "")
+        ws.cell(row=row_no, column=3, value=spec.spec or "")
+        ws.cell(row=row_no, column=4, value=spec.item_color or "")
+        ws.cell(row=row_no, column=5, value=spec.lami or "")
+        ws.cell(row=row_no, column=6, value=spec.item_size or "")
+        ws.cell(row=row_no, column=7, value=_format_decimal_text(spec.unit_weight_kg))
+        ws.cell(row=row_no, column=8, value=_format_decimal_text(spec.qty_m_or_m2))
+        ws.cell(row=row_no, column=9, value=_format_decimal_text(spec.wt_kg))
+        ws.cell(row=row_no, column=10, value=spec.other_note or "")
+
+    # Clear remaining template rows in spec table range.
+    filled = min(len(specs), end_row - start_row + 1)
+    for row_no in range(start_row + filled, end_row + 1):
+        for col in range(1, 11):
+            ws.cell(row=row_no, column=col, value="")
+
+    total_row = 22
+    ws.cell(row=total_row, column=1, value="Tổng")
+    total_wt = 0.0
+    for spec in specs:
+        wt = to_num(spec.wt_kg)
+        if wt is None:
+            wt = _compute_wt_kg(spec.unit_weight_kg, spec.qty_m_or_m2, spec.pcs_ea)
+        if wt is not None:
+            total_wt += wt
+    ws.cell(row=total_row, column=9, value=_format_decimal_text(total_wt))
+
+
+def _resolve_media_file_from_url(image_url: str | None):
+    url = _str_or_none(image_url)
+    if not url:
+        return None
+    parsed_path = unquote(urlparse(url).path or "")
+    media_url = settings.MEDIA_URL or "/media/"
+    if not media_url.startswith("/"):
+        media_url = f"/{media_url}"
+    if not media_url.endswith("/"):
+        media_url = f"{media_url}/"
+
+    rel = None
+    if parsed_path.startswith(media_url):
+        rel = parsed_path[len(media_url) :]
+    else:
+        marker = "/media/"
+        idx = parsed_path.find(marker)
+        if idx >= 0:
+            rel = parsed_path[idx + len(marker) :]
+    if not rel:
+        return None
+    return Path(settings.MEDIA_ROOT) / rel
+
+
+def _apply_form_product_sheet(
+    ws,
+    product: Product,
+    customer: Customer | None,
+    specs: list[ProductSpec],
+    print_images: list[ProductPrintImage],
+):
+    ws["A1"] = f"Bảng thông tin sản phẩm - {product.product_name or product.product_code or ''}".strip()
+    ws["B2"] = product.product_name or ""
+    ws["D2"] = product.product_code or ""
+    ws["B3"] = customer.customer_code if customer else ""
+    ws["D3"] = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
+    ws["B4"] = product.swl or ""
+    ws["D4"] = product.type or ""
+    ws["B5"] = product.sewing_type or ""
+    ws["D5"] = product.color or ""
+    ws["B6"] = product.spec_other or ""
+    ws["D6"] = product.spec_inner or ""
+    ws["B7"] = product.liner or ""
+    ws["D7"] = product.print or ""
+    ws["B8"] = product.top or ""
+    ws["D8"] = product.bottom or ""
+    ws["B9"] = product.packing or ""
+    ws["A10"] = "Item"
+    ws["B10"] = "Spec"
+    ws["C10"] = "Color"
+    ws["D10"] = "Thông tin"
+    ws["A20"] = f"Other : {product.other_note or ''}".strip()
+
+    # In template Form_Product, range E2:J19 is merged for print preview blocks.
+    # Only write selected specs into safe columns A/C in row 11..18.
+    start_row = 11
+    end_row = 18
+    for row_no in range(start_row, end_row + 1):
+        ws.cell(row=row_no, column=1, value="")
+        ws.cell(row=row_no, column=2, value="")
+        ws.cell(row=row_no, column=3, value="")
+        ws.cell(row=row_no, column=4, value="")
+
+    for i, spec in enumerate(specs[: end_row - start_row + 1], start=0):
+        row_no = start_row + i
+        ws.cell(row=row_no, column=1, value=spec.item.item_name if spec.item else "")
+        ws.cell(row=row_no, column=2, value=spec.spec or "")
+        ws.cell(row=row_no, column=3, value=spec.item_color or "")
+        detail_parts = [
+            f"Lami: {spec.lami or '-'}",
+            f"Size: {spec.item_size or '-'}",
+            f"PCS: {_format_decimal_text(spec.pcs_ea) or '-'}",
+            f"UW: {_format_decimal_text(spec.unit_weight_kg) or '-'}",
+            f"Qty: {_format_decimal_text(spec.qty_m_or_m2) or '-'}",
+            f"WT: {_format_decimal_text(spec.wt_kg) or '-'}",
+        ]
+        ws.cell(row=row_no, column=4, value=" | ".join(detail_parts))
+
+    # Print 1 / Print 2 preview images
+    try:
+        from openpyxl.drawing.image import Image as XLImage  # type: ignore
+    except Exception:
+        return
+
+    slots = [("E3", 0), ("H3", 1)]
+    for anchor, idx in slots:
+        if idx >= len(print_images):
+            continue
+        abs_path = _resolve_media_file_from_url(print_images[idx].image_url)
+        if abs_path is None or not abs_path.exists():
+            continue
+        try:
+            pic = XLImage(str(abs_path))
+            pic.width = 210
+            pic.height = 300
+            ws.add_image(pic, anchor)
+        except Exception:
+            continue
 
 def serialize_unit_weight_option(item: UnitWeightOption):
     return {
@@ -660,6 +1075,19 @@ def soft_delete_print_version(session, version_id: int):
         .values(deleted_at=ts)
     )
     session.execute(update(ProductPrintVersion).where(ProductPrintVersion.id == version_id).values(deleted_at=ts))
+
+
+def _sync_product_has_print_assets(session, product_id: int):
+    active_images = session.scalar(
+        select(func.count(ProductPrintImage.id))
+        .join(ProductPrintVersion, ProductPrintImage.product_print_version_id == ProductPrintVersion.id)
+        .where(
+            ProductPrintVersion.product_id == product_id,
+            _active(ProductPrintVersion),
+            _active(ProductPrintImage),
+        )
+    ) or 0
+    session.execute(update(Product).where(Product.id == product_id).values(has_print_assets=active_images > 0))
 
 
 @csrf_exempt
@@ -1173,7 +1601,7 @@ def material_groups(request: HttpRequest):
             raw_spec = _str_or_none(body.get("spec_label"))
             raw_pcs = _str_or_none(body.get("pcs_ea_label"))
             spec_label = _normalize_spec_abc(raw_spec)
-            pcs_ea_label = _normalize_number_text(raw_pcs)
+            pcs_ea_label = _normalize_number_text(raw_pcs) if raw_pcs is not None else "1"
             if raw_spec and not spec_label:
                 return _ok({"detail": "Spec phải đúng định dạng A*B*C (A là text hoặc số, B và C là số)"}, 400)
             if raw_pcs and pcs_ea_label is None:
@@ -1284,7 +1712,7 @@ def material_group_detail(request: HttpRequest, item_id: int):
             raw_spec = _str_or_none(body.get("spec_label"))
             raw_pcs = _str_or_none(body.get("pcs_ea_label"))
             spec_label = _normalize_spec_abc(raw_spec)
-            pcs_ea_label = _normalize_number_text(raw_pcs)
+            pcs_ea_label = _normalize_number_text(raw_pcs) if raw_pcs is not None else (_str_or_none(item.pcs_ea_label) or "1")
             if raw_spec and not spec_label:
                 return _ok({"detail": "Spec phải đúng định dạng A*B*C (A là text hoặc số, B và C là số)"}, 400)
             if raw_pcs and pcs_ea_label is None:
@@ -1387,18 +1815,75 @@ def items(request: HttpRequest):
             body = _body(request)
             item_name = _str_or_none(body.get("item_name"))
             item_color = _str_or_none(body.get("item_color"))
+            item_size_mode = (_str_or_none(body.get("item_size_mode")) or "fixed").lower()
+            item_size_fixed_type = (_str_or_none(body.get("item_size_fixed_type")) or "number").lower()
+            raw_item_size_value = _str_or_none(body.get("item_size_value"))
+            item_size_value = _normalize_number_text(raw_item_size_value) if raw_item_size_value is not None else None
+            item_size_value_text = _str_or_none(body.get("item_size_value_text"))
+            item_size_formula_code = _str_or_none(body.get("item_size_formula")) or _str_or_none(
+                body.get("item_size_formula_code")
+            )
+            item_size_source_field = (_str_or_none(body.get("item_size_source_field")) or "spec_inner").lower()
             if not item_name:
                 return _ok({"detail": "Thiếu item_name"}, 400)
+            if item_size_mode not in {"fixed", "formula"}:
+                return _ok({"detail": "item_size_mode không hợp lệ"}, 400)
+            if item_size_fixed_type not in {"number", "ab"}:
+                return _ok({"detail": "item_size_fixed_type không hợp lệ"}, 400)
+            if item_size_source_field not in {"spec_inner", "top", "bottom", "liner"}:
+                return _ok({"detail": "item_size_source_field không hợp lệ"}, 400)
+            if item_size_mode == "fixed":
+                if item_size_fixed_type == "ab":
+                    item_size_value_text = _normalize_ab_text(item_size_value_text)
+                    if not item_size_value_text:
+                        return _ok({"detail": "Item Size fixed kiểu A*B không hợp lệ"}, 400)
+                    item_size_value = None
+                else:
+                    if raw_item_size_value is None or item_size_value is None:
+                        return _ok({"detail": "Item Size (fixed) phải là số"}, 400)
+                    item_size_value_text = None
+                item_size_formula_code = None
+                item_size_source_field = None
+            else:
+                if item_size_source_field == "liner" and not _str_or_none(item_size_formula_code):
+                    item_size_formula_code = None
+                else:
+                    pair = _split_pair_formula(item_size_formula_code)
+                    if not pair:
+                        return _ok({"detail": "Công thức Item Size phải có dạng (expr1)*(expr2)"}, 400)
+                    left_expr = _validate_formula_expr(pair[0])
+                    right_expr = _validate_formula_expr(pair[1])
+                    if not left_expr or not right_expr:
+                        return _ok({"detail": "Công thức Item Size không hợp lệ. Chỉ dùng A/B/C, số và + - * / ( )"}, 400)
+                    item_size_formula_code = f"{left_expr}*{right_expr}"
+                item_size_value = None
+                item_size_value_text = None
+                item_size_fixed_type = "number"
             existing = session.scalar(select(Item).where(Item.item_name == item_name))
             if existing and existing.deleted_at is None:
                 return _ok({"detail": "Item đã tồn tại"}, 400)
             if existing and existing.deleted_at is not None:
                 existing.deleted_at = None
                 existing.item_color = item_color
+                existing.item_size_mode = item_size_mode
+                existing.item_size_fixed_type = item_size_fixed_type
+                existing.item_size_value = item_size_value
+                existing.item_size_value_text = item_size_value_text
+                existing.item_size_formula_code = item_size_formula_code
+                existing.item_size_source_field = item_size_source_field
                 session.add(existing)
                 session.flush()
                 return _ok(serialize_item(existing))
-            obj = Item(item_name=item_name, item_color=item_color)
+            obj = Item(
+                item_name=item_name,
+                item_color=item_color,
+                item_size_mode=item_size_mode,
+                item_size_fixed_type=item_size_fixed_type,
+                item_size_value=item_size_value,
+                item_size_value_text=item_size_value_text,
+                item_size_formula_code=item_size_formula_code,
+                item_size_source_field=item_size_source_field,
+            )
             session.add(obj)
             session.flush()
             return _ok(serialize_item(obj), 201)
@@ -1416,13 +1901,61 @@ def item_detail(request: HttpRequest, item_id: int):
             body = _body(request)
             item_name = _str_or_none(body.get("item_name"))
             item_color = _str_or_none(body.get("item_color"))
+            item_size_mode = (_str_or_none(body.get("item_size_mode")) or "fixed").lower()
+            item_size_fixed_type = (_str_or_none(body.get("item_size_fixed_type")) or "number").lower()
+            raw_item_size_value = _str_or_none(body.get("item_size_value"))
+            item_size_value = _normalize_number_text(raw_item_size_value) if raw_item_size_value is not None else None
+            item_size_value_text = _str_or_none(body.get("item_size_value_text"))
+            item_size_formula_code = _str_or_none(body.get("item_size_formula")) or _str_or_none(
+                body.get("item_size_formula_code")
+            )
+            item_size_source_field = (_str_or_none(body.get("item_size_source_field")) or "spec_inner").lower()
             if not item_name:
                 return _ok({"detail": "Thiếu item_name"}, 400)
+            if item_size_mode not in {"fixed", "formula"}:
+                return _ok({"detail": "item_size_mode không hợp lệ"}, 400)
+            if item_size_fixed_type not in {"number", "ab"}:
+                return _ok({"detail": "item_size_fixed_type không hợp lệ"}, 400)
+            if item_size_source_field not in {"spec_inner", "top", "bottom", "liner"}:
+                return _ok({"detail": "item_size_source_field không hợp lệ"}, 400)
+            if item_size_mode == "fixed":
+                if item_size_fixed_type == "ab":
+                    item_size_value_text = _normalize_ab_text(item_size_value_text)
+                    if not item_size_value_text:
+                        return _ok({"detail": "Item Size fixed kiểu A*B không hợp lệ"}, 400)
+                    item_size_value = None
+                else:
+                    if raw_item_size_value is None or item_size_value is None:
+                        return _ok({"detail": "Item Size (fixed) phải là số"}, 400)
+                    item_size_value_text = None
+                item_size_formula_code = None
+                item_size_source_field = None
+            else:
+                if item_size_source_field == "liner" and not _str_or_none(item_size_formula_code):
+                    item_size_formula_code = None
+                else:
+                    pair = _split_pair_formula(item_size_formula_code)
+                    if not pair:
+                        return _ok({"detail": "Công thức Item Size phải có dạng (expr1)*(expr2)"}, 400)
+                    left_expr = _validate_formula_expr(pair[0])
+                    right_expr = _validate_formula_expr(pair[1])
+                    if not left_expr or not right_expr:
+                        return _ok({"detail": "Công thức Item Size không hợp lệ. Chỉ dùng A/B/C, số và + - * / ( )"}, 400)
+                    item_size_formula_code = f"{left_expr}*{right_expr}"
+                item_size_value = None
+                item_size_value_text = None
+                item_size_fixed_type = "number"
             dup = session.scalar(select(Item).where(Item.item_name == item_name, Item.id != item.id, _active(Item)))
             if dup:
                 return _ok({"detail": "Item đã tồn tại"}, 400)
             item.item_name = item_name
             item.item_color = item_color
+            item.item_size_mode = item_size_mode
+            item.item_size_fixed_type = item_size_fixed_type
+            item.item_size_value = item_size_value
+            item.item_size_value_text = item_size_value_text
+            item.item_size_formula_code = item_size_formula_code
+            item.item_size_source_field = item_size_source_field
             session.add(item)
             session.flush()
             return _ok(serialize_item(item))
@@ -1905,6 +2438,7 @@ def product_detail(request: HttpRequest, item_id: int):
                 customer = session.scalar(select(Customer).where(Customer.id == body["customer_id"], _active(Customer)))
                 if not customer:
                     return _ok({"detail": "Customer không tồn tại hoặc đã xóa"}, 400)
+            need_recompute_spec_qty = False
             for f in [
                 "customer_id",
                 "product_code",
@@ -1931,6 +2465,10 @@ def product_detail(request: HttpRequest, item_id: int):
                         setattr(item, f, _normalize_diameter_value(body[f]))
                     else:
                         setattr(item, f, body[f])
+                    if f in {"spec_inner", "top", "bottom", "liner"}:
+                        need_recompute_spec_qty = True
+            if need_recompute_spec_qty:
+                _recompute_product_specs_item_size_qty(session, item)
             session.add(item)
             session.flush()
             return _ok(serialize_product(item))
@@ -1940,6 +2478,93 @@ def product_detail(request: HttpRequest, item_id: int):
             return _ok({"success": True})
 
     return _ok({"detail": "Method not allowed"}, 405)
+
+
+@csrf_exempt
+@require_auth
+def product_export_excel(request: HttpRequest, product_id: int):
+    if request.method != "POST":
+        return _ok({"detail": "Method not allowed"}, 405)
+
+    body = _body(request)
+    mode = (_str_or_none(body.get("mode")) or "").strip().lower()
+    if mode not in {"form_product", "form_specification"}:
+        return _ok({"detail": "mode không hợp lệ"}, 400)
+
+    template_path = settings.BASE_DIR.parent / "MINHPHUONG_GROUP.xlsx"
+    if not template_path.exists():
+        return _ok({"detail": "Không tìm thấy file mẫu MINHPHUONG_GROUP.xlsx"}, 404)
+
+    try:
+        from openpyxl import load_workbook  # type: ignore
+    except Exception:
+        return _ok({"detail": "Thiếu thư viện openpyxl. Vui lòng cài openpyxl để xuất Excel"}, 500)
+
+    try:
+        with get_session() as session:
+            product = session.scalar(select(Product).where(Product.id == product_id, _active(Product)))
+            if not product:
+                return _ok({"detail": "Product không tồn tại hoặc đã xóa"}, 404)
+            customer = session.scalar(select(Customer).where(Customer.id == product.customer_id, _active(Customer)))
+
+            specs = session.scalars(
+                select(ProductSpec)
+                .where(ProductSpec.product_id == product_id, _active(ProductSpec))
+                .order_by(ProductSpec.id.asc())
+            ).all()
+            print_images = session.scalars(
+                select(ProductPrintImage)
+                .join(ProductPrintVersion, ProductPrintImage.product_print_version_id == ProductPrintVersion.id)
+                .where(
+                    ProductPrintVersion.product_id == product_id,
+                    _active(ProductPrintVersion),
+                    _active(ProductPrintImage),
+                )
+                .order_by(ProductPrintVersion.version_no.desc(), ProductPrintImage.sort_order.asc())
+            ).all()
+
+            if mode == "form_product":
+                selected_ids = body.get("spec_ids") or []
+                try:
+                    selected_ids = [int(x) for x in selected_ids]
+                except Exception:
+                    return _ok({"detail": "spec_ids không hợp lệ"}, 400)
+                if not selected_ids:
+                    return _ok({"detail": "Vui lòng chọn ít nhất 1 spec để xuất form product"}, 400)
+                selected_set = set(selected_ids)
+                specs = [s for s in specs if s.id in selected_set]
+                if not specs:
+                    return _ok({"detail": "Không có spec hợp lệ để xuất"}, 400)
+
+            wb = load_workbook(str(template_path))
+            target_sheet = "Form_Product" if mode == "form_product" else "Form_Specification"
+            if target_sheet not in wb.sheetnames:
+                return _ok({"detail": f"Không tìm thấy sheet {target_sheet} trong file mẫu"}, 400)
+
+            for name in list(wb.sheetnames):
+                if name != target_sheet:
+                    wb.remove(wb[name])
+            ws = wb[target_sheet]
+
+            if mode == "form_product":
+                _apply_form_product_sheet(ws, product, customer, specs, print_images)
+                suffix = "form_product"
+            else:
+                _apply_form_specification_sheet(ws, product, customer, specs)
+                suffix = "form_specification"
+
+            out = BytesIO()
+            wb.save(out)
+            out.seek(0)
+            filename = f"{product.product_code or 'product'}_{suffix}.xlsx"
+            resp = HttpResponse(
+                out.getvalue(),
+                content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+            resp["Content-Disposition"] = f'attachment; filename="{filename}"'
+            return resp
+    except Exception as exc:
+        return _ok({"detail": f"Lỗi xuất Excel: {exc}"}, 500)
 
 
 @csrf_exempt
@@ -1985,16 +2610,30 @@ def product_specs(request: HttpRequest, product_id: int):
             if raw_item_color in {"-", "--"}:
                 raw_item_color = None
 
-            item = ProductSpec(
-                product_id=product_id,
-                item_id=item.id,
-                material_group_id=material_group.id,
-                line_no=body.get("line_no") or 1,
-                spec=body.get("spec") or material_group.spec_label,
-                item_size=body.get("item_size"),
-                lami=body.get("lami") or ("Yes" if material_group.has_lami else None),
-                item_color=raw_item_color or item.item_color or product.color,
-                unit_weight_kg=body.get("unit_weight_kg")
+            computed_item_size = (
+                body.get("item_size")
+                if body.get("item_size") is not None
+                else _compute_item_size(
+                    item.item_size_mode,
+                    item.item_size_fixed_type,
+                    item.item_size_value,
+                    item.item_size_value_text,
+                    item.item_size_formula_code,
+                    _resolve_item_size_source_value(
+                        item.item_size_source_field,
+                        product,
+                        body.get("spec") or material_group.spec_label,
+                    ),
+                    item.item_size_source_field,
+                )
+            )
+            computed_qty = (
+                body.get("qty_m_or_m2")
+                if body.get("qty_m_or_m2") is not None
+                else _compute_qty_from_item_size(computed_item_size)
+            )
+            computed_unit_weight = (
+                body.get("unit_weight_kg")
                 if body.get("unit_weight_kg") is not None
                 else _compute_unit_weight(
                     material_group.unit_weight_mode,
@@ -2004,15 +2643,31 @@ def product_specs(request: HttpRequest, product_id: int):
                     material_group.unit_weight_option.unit_weight_value if material_group.unit_weight_option else None,
                     material_group.use_lami_for_calc,
                     material_group.lami_calc_value,
-                ),
-                qty_m_or_m2=body.get("qty_m_or_m2"),
-                pcs_ea=body.get("pcs_ea"),
-                wt_kg=body.get("wt_kg"),
-                other_note=body.get("other_note"),
+                )
             )
-            session.add(item)
-            session.flush()
-            return _ok(serialize_spec(item), 201)
+            computed_wt = _compute_wt_kg(computed_unit_weight, computed_qty, body.get("pcs_ea"))
+
+            try:
+                spec_row = ProductSpec(
+                    product_id=product_id,
+                    item_id=item.id,
+                    material_group_id=material_group.id,
+                    line_no=_next_product_spec_line_no(session, product_id),
+                    spec=body.get("spec") or material_group.spec_label,
+                    item_size=computed_item_size,
+                    lami=body.get("lami") or ("Yes" if material_group.has_lami else None),
+                    item_color=raw_item_color or item.item_color or product.color,
+                    unit_weight_kg=computed_unit_weight,
+                    qty_m_or_m2=computed_qty,
+                    pcs_ea=body.get("pcs_ea"),
+                    wt_kg=computed_wt,
+                    other_note=body.get("other_note"),
+                )
+                session.add(spec_row)
+                session.flush()
+                return _ok(serialize_spec(spec_row), 201)
+            except IntegrityError:
+                return _ok({"detail": "Không thể tạo Product Spec do trùng LineNo, vui lòng thử lại"}, 409)
 
     return _ok({"detail": "Method not allowed"}, 405)
 
@@ -2028,9 +2683,10 @@ def product_spec_detail(request: HttpRequest, spec_id: int):
         if request.method == "PUT":
             body = _body(request)
             recompute_weight = False
+            recompute_item_size = False
             next_material_group: MaterialGroup | None = None
+            next_item: Item | None = None
             if "item_id" in body or "item_name" in body:
-                next_item = None
                 if body.get("item_id"):
                     next_item = session.scalar(select(Item).where(Item.id == int(body.get("item_id")), _active(Item)))
                 if not next_item and "item_name" in body:
@@ -2038,6 +2694,7 @@ def product_spec_detail(request: HttpRequest, spec_id: int):
                 if not next_item:
                     return _ok({"detail": "item không hợp lệ"}, 400)
                 item.item_id = next_item.id
+                recompute_item_size = True
 
             if "material_group_id" in body or "material_group" in body:
                 next_mg = None
@@ -2062,13 +2719,34 @@ def product_spec_detail(request: HttpRequest, spec_id: int):
                 "unit_weight_kg",
                 "qty_m_or_m2",
                 "pcs_ea",
-                "wt_kg",
                 "other_note",
             ]:
                 if f in body:
                     setattr(item, f, body[f])
                     if f == "spec":
                         recompute_weight = True
+                        recompute_item_size = True
+
+            if recompute_item_size and "item_size" not in body:
+                if next_item is None:
+                    next_item = session.scalar(select(Item).where(Item.id == item.item_id, _active(Item)))
+                if next_item is not None:
+                    product_of_spec = session.scalar(select(Product).where(Product.id == item.product_id, _active(Product)))
+                    item.item_size = _compute_item_size(
+                        next_item.item_size_mode,
+                        next_item.item_size_fixed_type,
+                        next_item.item_size_value,
+                        next_item.item_size_value_text,
+                        next_item.item_size_formula_code,
+                        _resolve_item_size_source_value(
+                            next_item.item_size_source_field,
+                            product_of_spec,
+                            item.spec,
+                        ) if product_of_spec is not None else item.spec,
+                        next_item.item_size_source_field,
+                    )
+            if ("item_size" in body or recompute_item_size) and "qty_m_or_m2" not in body:
+                item.qty_m_or_m2 = _compute_qty_from_item_size(item.item_size)
 
             if recompute_weight and "unit_weight_kg" not in body:
                 if next_material_group is None:
@@ -2090,6 +2768,7 @@ def product_spec_detail(request: HttpRequest, spec_id: int):
                         next_material_group.use_lami_for_calc,
                         next_material_group.lami_calc_value,
                     )
+            item.wt_kg = _compute_wt_kg(item.unit_weight_kg, item.qty_m_or_m2, item.pcs_ea)
             session.add(item)
             session.flush()
             return _ok(serialize_spec(item))
@@ -2134,6 +2813,35 @@ def product_print_versions(request: HttpRequest, product_id: int):
 
 @csrf_exempt
 @require_auth
+def product_print_images(request: HttpRequest, product_id: int):
+    with get_session() as session:
+        if request.method != "GET":
+            return _ok({"detail": "Method not allowed"}, 405)
+        product = session.scalar(select(Product).where(Product.id == product_id, _active(Product)))
+        if not product:
+            return _ok({"detail": "Product không tồn tại hoặc đã xóa"}, 404)
+
+        rows = session.execute(
+            select(ProductPrintImage, ProductPrintVersion)
+            .join(ProductPrintVersion, ProductPrintImage.product_print_version_id == ProductPrintVersion.id)
+            .where(
+                ProductPrintVersion.product_id == product_id,
+                _active(ProductPrintVersion),
+                _active(ProductPrintImage),
+            )
+            .order_by(ProductPrintVersion.version_no.desc(), ProductPrintImage.sort_order.asc())
+        ).all()
+        out = []
+        for image, version in rows:
+            item = serialize_image(image)
+            item["version_no"] = version.version_no
+            item["product_id"] = version.product_id
+            out.append(item)
+        return _ok(out)
+
+
+@csrf_exempt
+@require_auth
 def product_print_upload(request: HttpRequest, product_id: int):
     if request.method != "POST":
         return _ok({"detail": "Method not allowed"}, 405)
@@ -2145,48 +2853,54 @@ def product_print_upload(request: HttpRequest, product_id: int):
     upload_note = request.POST.get("upload_note")
     current_user = request.current_user
 
-    with get_session() as session:
-        product = session.scalar(select(Product).where(Product.id == product_id, _active(Product)))
-        if not product:
-            return _ok({"detail": "Product không tồn tại hoặc đã xóa"}, 404)
+    try:
+        with get_session() as session:
+            product = session.scalar(select(Product).where(Product.id == product_id, _active(Product)))
+            if not product:
+                return _ok({"detail": "Product không tồn tại hoặc đã xóa"}, 404)
 
-        last = session.scalar(
-            select(func.max(ProductPrintVersion.version_no)).where(ProductPrintVersion.product_id == product_id, _active(ProductPrintVersion))
-        ) or 0
-        version = ProductPrintVersion(
-            product_id=product_id,
-            version_no=last + 1,
-            upload_note=upload_note,
-            created_by=current_user.username,
-        )
-        session.add(version)
-        session.flush()
+            last_version_no = session.scalar(
+                select(func.max(ProductPrintVersion.version_no)).where(ProductPrintVersion.product_id == product_id, _active(ProductPrintVersion))
+            ) or 0
 
-        target_dir = Path(settings.MEDIA_ROOT) / "print_images" / str(product_id) / str(version.version_no)
-        target_dir.mkdir(parents=True, exist_ok=True)
+            created_versions = []
+            for f in files:
+                last_version_no += 1
+                version = ProductPrintVersion(
+                    product_id=product_id,
+                    version_no=last_version_no,
+                    upload_note=upload_note,
+                    created_by=current_user.username,
+                )
+                session.add(version)
+                session.flush()
 
-        for i, f in enumerate(files, start=1):
-            ext = Path(f.name).suffix.lower()
-            file_name = f"{i:03d}_{uuid.uuid4().hex}{ext}"
-            abs_path = target_dir / file_name
-            with abs_path.open("wb+") as dst:
-                for chunk in f.chunks():
-                    dst.write(chunk)
-            rel_path = os.path.relpath(abs_path, settings.MEDIA_ROOT)
-            image_url = request.build_absolute_uri(settings.MEDIA_URL + rel_path.replace("\\", "/"))
-            img = ProductPrintImage(
-                product_print_version_id=version.id,
-                image_url=image_url,
-                file_name=f.name,
-                mime_type=f.content_type,
-                file_size=f.size,
-                sort_order=i,
-            )
-            session.add(img)
+                target_dir = Path(settings.MEDIA_ROOT) / "print_images" / str(product_id) / str(version.version_no)
+                target_dir.mkdir(parents=True, exist_ok=True)
+                ext = Path(f.name).suffix.lower()
+                file_name = f"001_{uuid.uuid4().hex}{ext}"
+                abs_path = target_dir / file_name
+                with abs_path.open("wb+") as dst:
+                    for chunk in f.chunks():
+                        dst.write(chunk)
+                rel_path = os.path.relpath(abs_path, settings.MEDIA_ROOT)
+                image_url = request.build_absolute_uri(settings.MEDIA_URL + rel_path.replace("\\", "/"))
+                img = ProductPrintImage(
+                    product_print_version_id=version.id,
+                    image_url=image_url,
+                    file_name=f.name,
+                    mime_type=f.content_type,
+                    file_size=f.size,
+                    sort_order=1,
+                )
+                session.add(img)
+                created_versions.append(serialize_version(version))
 
-        session.execute(update(Product).where(Product.id == product_id).values(has_print_assets=True))
-        session.flush()
-        return _ok(serialize_version(version), 201)
+            _sync_product_has_print_assets(session, product_id)
+            session.flush()
+            return _ok({"created": len(created_versions), "versions": created_versions}, 201)
+    except Exception as exc:
+        return _ok({"detail": f"Upload ảnh thất bại: {exc}"}, 500)
 
 
 @csrf_exempt
@@ -2207,6 +2921,43 @@ def print_version_detail(request: HttpRequest, version_id: int):
 
         if request.method == "DELETE":
             soft_delete_print_version(session, version_id)
+            _sync_product_has_print_assets(session, version.product_id)
+            return _ok({"success": True})
+
+    return _ok({"detail": "Method not allowed"}, 405)
+
+
+@csrf_exempt
+@require_auth
+def print_image_detail(request: HttpRequest, image_id: int):
+    with get_session() as session:
+        image = session.scalar(select(ProductPrintImage).where(ProductPrintImage.id == image_id, _active(ProductPrintImage)))
+        if not image:
+            return _ok({"detail": "Not found"}, 404)
+        version = session.scalar(
+            select(ProductPrintVersion).where(
+                ProductPrintVersion.id == image.product_print_version_id,
+                _active(ProductPrintVersion),
+            )
+        )
+        if not version:
+            return _ok({"detail": "Version not found"}, 404)
+
+        if request.method == "DELETE":
+            image.deleted_at = _now()
+            session.add(image)
+            session.flush()
+
+            remain_count = session.scalar(
+                select(func.count(ProductPrintImage.id)).where(
+                    ProductPrintImage.product_print_version_id == version.id,
+                    _active(ProductPrintImage),
+                )
+            ) or 0
+            if remain_count == 0:
+                soft_delete_print_version(session, version.id)
+            _sync_product_has_print_assets(session, version.product_id)
+            session.flush()
             return _ok({"success": True})
 
     return _ok({"detail": "Method not allowed"}, 405)
@@ -2215,6 +2966,7 @@ def print_version_detail(request: HttpRequest, version_id: int):
 @csrf_exempt
 @require_auth
 def production_plans(request: HttpRequest):
+    _ensure_production_plan_note_column()
     with get_session() as session:
         if request.method == "GET":
             search = (request.GET.get("search") or "").strip()
@@ -2238,12 +2990,13 @@ def production_plans(request: HttpRequest):
                 eta=parse_date(body.get("eta")),
                 contp_date=parse_date(body.get("contp_date")),
                 order_qty_pcs=body.get("order_qty_pcs") or 0,
-                spec_inner_snapshot=body.get("spec_inner_snapshot"),
-                liner_snapshot=body.get("liner_snapshot"),
-                print_snapshot=body.get("print_snapshot"),
-                label=body.get("label"),
-                sewing_type=body.get("sewing_type"),
-                packing=body.get("packing"),
+                spec_inner_snapshot=_norm_text(body.get("spec_inner_snapshot")) if body.get("spec_inner_snapshot") is not None else p.spec_inner,
+                liner_snapshot=_norm_text(body.get("liner_snapshot")) if body.get("liner_snapshot") is not None else p.liner,
+                print_snapshot=_norm_text(body.get("print_snapshot")) if body.get("print_snapshot") is not None else p.print,
+                label=_norm_text(body.get("label")) if body.get("label") is not None else p.product_name,
+                sewing_type=_norm_text(body.get("sewing_type")) if body.get("sewing_type") is not None else p.sewing_type,
+                packing=_norm_text(body.get("packing")) if body.get("packing") is not None else p.packing,
+                note=_str_or_none(body.get("note")),
                 status=body.get("status") or "draft",
                 update_person=body.get("update_person"),
             )
@@ -2257,6 +3010,7 @@ def production_plans(request: HttpRequest):
 @csrf_exempt
 @require_auth
 def production_plan_detail(request: HttpRequest, item_id: int):
+    _ensure_production_plan_note_column()
     with get_session() as session:
         item = session.scalar(select(ProductionPlan).where(ProductionPlan.id == item_id, _active(ProductionPlan)))
         if not item:
@@ -2275,11 +3029,17 @@ def production_plan_detail(request: HttpRequest, item_id: int):
                 "label",
                 "sewing_type",
                 "packing",
+                "note",
                 "status",
                 "update_person",
             ]:
                 if f in body:
-                    setattr(item, f, body[f])
+                    if f in {"spec_inner_snapshot", "liner_snapshot", "print_snapshot", "label", "sewing_type", "packing"}:
+                        setattr(item, f, _norm_text(body[f]))
+                    elif f == "note":
+                        setattr(item, f, _str_or_none(body[f]))
+                    else:
+                        setattr(item, f, body[f])
             if "etd" in body:
                 item.etd = parse_date(body.get("etd"))
             if "eta" in body:
@@ -2291,6 +3051,20 @@ def production_plan_detail(request: HttpRequest, item_id: int):
             p = session.scalar(select(Product).where(Product.id == item.product_id, _active(Product)))
             if not customer or not p or p.customer_id != int(item.customer_id):
                 return _ok({"detail": "Product không thuộc Customer đã chọn"}, 400)
+
+            # Default from selected product only when client does not provide value.
+            if "spec_inner_snapshot" not in body and not item.spec_inner_snapshot:
+                item.spec_inner_snapshot = p.spec_inner
+            if "liner_snapshot" not in body and not item.liner_snapshot:
+                item.liner_snapshot = p.liner
+            if "print_snapshot" not in body and not item.print_snapshot:
+                item.print_snapshot = p.print
+            if "label" not in body and not item.label:
+                item.label = p.product_name
+            if "sewing_type" not in body and not item.sewing_type:
+                item.sewing_type = p.sewing_type
+            if "packing" not in body and not item.packing:
+                item.packing = p.packing
 
             session.add(item)
             session.flush()

@@ -1,9 +1,9 @@
-import { ChangeEvent, DragEvent, FormEvent, useEffect, useMemo, useRef, useState } from 'react'
+import { FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import Select from 'react-select'
-import { CheckCircle2, Eye, Pencil, Plus, Trash2, Upload, XCircle } from 'lucide-react'
-import { api } from '../lib/api'
-import { Customer, Item, MaterialGroup, PrintImage, PrintVersion, Product, ProductSpec } from '../types'
+import { CheckCircle2, Eye, FileSpreadsheet, Pencil, Plus, Trash2, Upload, X, XCircle } from 'lucide-react'
+import { api, API_BASE } from '../lib/api'
+import { Customer, Item, MaterialGroup, PrintImage, Product, ProductSpec } from '../types'
 import { I18nKey } from '../lib/i18n'
 import ConfirmModal from '../components/ConfirmModal'
 import FormModal from '../components/FormModal'
@@ -19,11 +19,21 @@ type BulkSpecRow = {
   material_group?: string
   lami: string
   spec: string
+  item_size: string
   item_color: string
+  other_note: string
   pcs_ea: string
   unit_weight_kg: string
   qty_m_or_m2: string
   wt_kg: string
+}
+type SpecEditRow = {
+  lami: string
+  spec: string
+  item_size: string
+  item_color: string
+  pcs_ea: string
+  other_note: string
 }
 
 const PRODUCT_TYPES = [
@@ -41,6 +51,7 @@ const SEWING_TYPES = ['INSIDE', 'OUTSIDE']
 const SPEC_ABC_REGEX = /^\s*[^*]+\s*\*\s*\d+(\.\d+)?\s*\*\s*\d+(\.\d+)?\s*$/
 const FORMULA_ALLOWED_REGEX = /^[A-Za-z0-9_+\-*/().\s]+$/
 const A_NUMBER_REGEX = /[-+]?\d+(\.\d+)?/
+const SPEC_AB_REGEX = /^\s*[^*]+\s*\*\s*\d+(\.\d+)?\s*$/
 
 const productInit = {
   customer_id: '',
@@ -79,12 +90,17 @@ export default function ProductsPage({ token, notify, t }: Props) {
   const [showForm, setShowForm] = useState(false)
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null)
   const [specs, setSpecs] = useState<ProductSpec[]>([])
+  const [specEdits, setSpecEdits] = useState<Record<number, SpecEditRow>>({})
   const [showBulkSpecModal, setShowBulkSpecModal] = useState(false)
   const [bulkSpecItems, setBulkSpecItems] = useState<Option[]>([])
   const [bulkSpecRows, setBulkSpecRows] = useState<BulkSpecRow[]>([])
   const [selectedSpecIds, setSelectedSpecIds] = useState<Set<number>>(new Set())
   const [showBulkSpecDeleteConfirm, setShowBulkSpecDeleteConfirm] = useState(false)
+  const [showExportModal, setShowExportModal] = useState(false)
+  const [exportMode, setExportMode] = useState<'form_product' | 'form_specification'>('form_specification')
+  const [selectedExportSpecIds, setSelectedExportSpecIds] = useState<Set<number>>(new Set())
   const [images, setImages] = useState<PrintImage[]>([])
+  const [activeImage, setActiveImage] = useState<PrintImage | null>(null)
   const [pendingDelete, setPendingDelete] = useState<Product | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false)
@@ -92,7 +108,6 @@ export default function ProductsPage({ token, notify, t }: Props) {
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(10)
   const firstSearchRunRef = useRef(true)
-  const printImageUploadRef = useRef<HTMLInputElement | null>(null)
 
   const customerOptions: Option[] = customers.map((c) => ({
     value: c.id,
@@ -110,18 +125,25 @@ export default function ProductsPage({ token, notify, t }: Props) {
   const typeMode = PRODUCT_TYPES.includes(form.type) ? form.type : (form.type ? 'OTHER' : PRODUCT_TYPES[0])
   const sewingMode = SEWING_TYPES.includes(form.sewing_type) ? form.sewing_type : (form.sewing_type ? 'OTHER' : SEWING_TYPES[0])
 
-  const loadBase = async () => {
-    const [cus, prod, it, mg] = await Promise.all([
+  const loadReferenceData = async () => {
+    const [cus, it, mg] = await Promise.all([
       api<Customer[]>('/api/customers', 'GET', undefined, token),
-      api<Product[]>(`/api/products?search=${encodeURIComponent(search)}`, 'GET', undefined, token),
       api<Item[]>('/api/items', 'GET', undefined, token),
       api<MaterialGroup[]>('/api/material-groups', 'GET', undefined, token),
     ])
     setCustomers(cus)
-    setProducts(prod)
     setItems(it)
     setMaterialGroups(mg)
+  }
+
+  const loadProductList = async () => {
+    const prod = await api<Product[]>(`/api/products?search=${encodeURIComponent(search)}`, 'GET', undefined, token)
+    setProducts(prod)
     setPage(1)
+  }
+
+  const loadBase = async () => {
+    await Promise.all([loadReferenceData(), loadProductList()])
   }
 
   const loadSpecs = async (productId: number) => {
@@ -129,15 +151,22 @@ export default function ProductsPage({ token, notify, t }: Props) {
     setSpecs(data)
   }
 
-  const loadVersions = async (productId: number) => {
-    const data = await api<PrintVersion[]>(`/api/products/${productId}/print-versions`, 'GET', undefined, token)
-    if (data.length > 0) {
-      const latest = data[0]
-      const detail = await api<{ version: PrintVersion; images: PrintImage[] }>(`/api/print-versions/${latest.id}`, 'GET', undefined, token)
-      setImages(detail.images)
+  const loadPrintImages = async (productId: number) => {
+    try {
+      const data = await api<PrintImage[]>(`/api/products/${productId}/print-images`, 'GET', undefined, token)
+      setImages(data)
       return
+    } catch {
+      const versions = await api<{ id: number; version_no: number }[]>(`/api/products/${productId}/print-versions`, 'GET', undefined, token)
+      const imageRows: PrintImage[] = []
+      for (const v of versions) {
+        const detail = await api<{ images: PrintImage[] }>(`/api/print-versions/${v.id}`, 'GET', undefined, token)
+        for (const img of detail.images || []) {
+          imageRows.push({ ...img, version_no: v.version_no, product_id: productId })
+        }
+      }
+      setImages(imageRows)
     }
-    setImages([])
   }
 
   const loadDetail = async (productId: number) => {
@@ -146,8 +175,12 @@ export default function ProductsPage({ token, notify, t }: Props) {
   }
 
   useEffect(() => {
+    if (isDetailPage) {
+      void loadReferenceData()
+      return
+    }
     void loadBase()
-  }, [])
+  }, [isDetailPage])
 
   useEffect(() => {
     if (firstSearchRunRef.current) {
@@ -156,7 +189,7 @@ export default function ProductsPage({ token, notify, t }: Props) {
     }
     if (isDetailPage) return
     const timer = window.setTimeout(() => {
-      void loadBase()
+      void loadProductList()
     }, 250)
     return () => window.clearTimeout(timer)
   }, [search, isDetailPage])
@@ -168,15 +201,29 @@ export default function ProductsPage({ token, notify, t }: Props) {
 
   useEffect(() => {
     if (!detailProductId) return
-    void loadBase()
+    void loadReferenceData()
     void loadDetail(detailProductId)
     void loadSpecs(detailProductId)
-    void loadVersions(detailProductId)
+    void loadPrintImages(detailProductId)
   }, [detailProductId])
 
   useEffect(() => {
     const valid = new Set(specs.map((s) => s.id))
     setSelectedSpecIds((prev) => new Set([...prev].filter((id) => valid.has(id))))
+    setSpecEdits((prev) => {
+      const next: Record<number, SpecEditRow> = {}
+      specs.forEach((s) => {
+        next[s.id] = prev[s.id] || {
+          lami: s.lami || '-',
+          spec: s.spec || '',
+          item_size: s.item_size || '',
+          item_color: s.item_color || '',
+          pcs_ea: s.pcs_ea != null ? String(s.pcs_ea) : '',
+          other_note: s.other_note || '',
+        }
+      })
+      return next
+    })
   }, [specs])
 
   const saveProduct = async (e: FormEvent) => {
@@ -198,6 +245,10 @@ export default function ProductsPage({ token, notify, t }: Props) {
       setEditingId(null)
       setShowForm(false)
       await loadBase()
+      if (detailProductId) {
+        await loadDetail(detailProductId)
+        await loadSpecs(detailProductId)
+      }
       notify(editingId ? t('productUpdated') : t('productCreated'), 'success')
     } catch (err) {
       const message = (err as Error).message
@@ -313,17 +364,21 @@ export default function ProductsPage({ token, notify, t }: Props) {
       selectedOpts.map((opt, idx) => {
         const existing = prevMap.get(opt.value)
         if (existing) return existing
+        const initialSpec = (selectedProduct?.spec_inner || '').trim()
+        const initialItemSize = computeItemSizeByItem(itemById.get(opt.value), initialSpec)
         return {
           key: Date.now() + idx,
           item_id: opt.value,
           item_name: opt.label,
           lami: '-',
           spec: '',
+          item_size: initialItemSize,
           item_color: resolveItemColor(opt.value),
-          pcs_ea: '-',
+          other_note: '',
+          pcs_ea: '1',
           unit_weight_kg: '-',
-          qty_m_or_m2: '-',
-          wt_kg: '-',
+          qty_m_or_m2: computeQtyFromItemSize(initialItemSize),
+          wt_kg: computeWtTextFromValues(computeQtyFromItemSize(initialItemSize), '-', '-'),
         }
       }),
     )
@@ -371,23 +426,142 @@ export default function ProductsPage({ token, notify, t }: Props) {
     }
   }
 
+  const splitTopLevelStar = (expr: string) => {
+    let depth = 0
+    for (let i = 0; i < expr.length; i += 1) {
+      const ch = expr[i]
+      if (ch === '(') depth += 1
+      else if (ch === ')') depth -= 1
+      else if (ch === '*' && depth === 0) {
+        const left = expr.slice(0, i).trim()
+        const right = expr.slice(i + 1).trim()
+        if (!left || !right) return null
+        return { left, right }
+      }
+    }
+    return null
+  }
+
+  const resolveItemSizeSourceValue = (itemRow: Item | undefined, fallbackSpec: string) => {
+    const source = (itemRow?.item_size_source_field || 'spec_inner').toLowerCase()
+    if (source === 'spec_inner') return (selectedProduct?.spec_inner || fallbackSpec || '').trim()
+    if (source === 'top') return (selectedProduct?.top || '').trim()
+    if (source === 'bottom') return (selectedProduct?.bottom || '').trim()
+    if (source === 'liner') return (selectedProduct?.liner || '').trim()
+    return (selectedProduct?.spec_inner || fallbackSpec || '').trim()
+  }
+
+  const computeItemSizeByItem = (itemRow: Item | undefined, fallbackSpec: string) => {
+    if (!itemRow) return '-'
+    const mode = (itemRow.item_size_mode || 'fixed').toLowerCase()
+    if (mode === 'fixed') {
+      if ((itemRow.item_size_fixed_type || 'number') === 'ab') {
+        return itemRow.item_size_value_text || '-'
+      }
+      if (itemRow.item_size_value == null || Number.isNaN(Number(itemRow.item_size_value))) return '-'
+      return String(itemRow.item_size_value)
+    }
+    const sourceValue = resolveItemSizeSourceValue(itemRow, fallbackSpec)
+    const formula = (itemRow.item_size_formula || itemRow.item_size_formula_code || '').trim()
+    if ((itemRow.item_size_source_field || '').toLowerCase() === 'liner' && !formula) {
+      return sourceValue || '-'
+    }
+    if (!formula || !FORMULA_ALLOWED_REGEX.test(formula)) return '-'
+    const pair = splitTopLevelStar(formula)
+    if (!pair) return '-'
+    const sourceIsAB = ['top', 'bottom'].includes((itemRow.item_size_source_field || '').toLowerCase())
+    if (sourceIsAB && !SPEC_AB_REGEX.test(sourceValue || '')) return '-'
+    if (!sourceIsAB && !SPEC_ABC_REGEX.test(sourceValue || '')) return '-'
+    const parts = (sourceValue || '').split('*').map((p) => p.trim())
+    const aMatch = (parts[0] || '').match(A_NUMBER_REGEX)
+    const a = aMatch ? Number(aMatch[0]) : Number.NaN
+    const b = parts.length >= 2 ? Number(parts[1]) : Number.NaN
+    const c = parts.length >= 3 ? Number(parts[2]) : Number.NaN
+    const replaceVars = (expr: string) => expr
+      .replace(/\bA\b/gi, Number.isNaN(a) ? 'NaN' : `(${String(a)})`)
+      .replace(/\bB\b/gi, Number.isNaN(b) ? 'NaN' : `(${String(b)})`)
+      .replace(/\bC\b/gi, Number.isNaN(c) ? 'NaN' : `(${String(c)})`)
+    try {
+      // eslint-disable-next-line no-new-func
+      const left = Function(`"use strict"; return (${replaceVars(pair.left)});`)()
+      // eslint-disable-next-line no-new-func
+      const right = Function(`"use strict"; return (${replaceVars(pair.right)});`)()
+      if (typeof left !== 'number' || Number.isNaN(left) || !Number.isFinite(left)) return '-'
+      if (typeof right !== 'number' || Number.isNaN(right) || !Number.isFinite(right)) return '-'
+      return `${left}*${right}`
+    } catch {
+      return '-'
+    }
+  }
+
+  const computeQtyFromItemSize = (itemSize: string) => {
+    const text = (itemSize || '').trim()
+    if (!text || text === '-') return '-'
+    const parts = text.split('*').map((p) => p.trim())
+    let out = 1
+    for (const p of parts) {
+      const m = p.match(A_NUMBER_REGEX)
+      if (!m) return '-'
+      const n = Number(m[0])
+      if (Number.isNaN(n)) return '-'
+      out *= n
+    }
+    if (parts.length === 2) {
+      out /= 10000
+    }
+    return String(out)
+  }
+
+  const toFiniteNumber = (value: unknown): number | null => {
+    if (value == null) return null
+    const asNumber = typeof value === 'number' ? value : Number(String(value).replace(/,/g, '').trim())
+    if (Number.isNaN(asNumber) || !Number.isFinite(asNumber)) return null
+    return asNumber
+  }
+
+  const computeWtFromValues = (qty: unknown, pcs: unknown, unitWeight: unknown): number | null => {
+    const qtyNum = toFiniteNumber(qty)
+    const pcsNum = toFiniteNumber(pcs)
+    const unitWeightNum = toFiniteNumber(unitWeight)
+    if (qtyNum == null || pcsNum == null || unitWeightNum == null) return null
+    return qtyNum * pcsNum * unitWeightNum
+  }
+
+  const computeWtTextFromValues = (qty: unknown, pcs: unknown, unitWeight: unknown): string => {
+    const result = computeWtFromValues(qty, pcs, unitWeight)
+    return result == null ? '-' : String(result)
+  }
+
+  const formatNumberMax5 = (value: number | null | undefined) => {
+    if (value == null || Number.isNaN(value) || !Number.isFinite(value)) return '-'
+    return value.toFixed(5).replace(/\.?0+$/, '')
+  }
+
   const onBulkRowMaterialGroupChange = (rowKey: number, value: string) => {
     const mgId = value ? Number(value) : undefined
     const mg = mgId ? materialGroupById.get(mgId) : undefined
     setBulkSpecRows((prev) =>
       prev.map((row) => {
         if (row.key !== rowKey) return row
+        const nextSpec = mg?.spec_label || row.spec || (selectedProduct?.spec_inner || '')
+        const nextItemSize = computeItemSizeByItem(itemById.get(row.item_id), nextSpec)
+        const nextPcs = mg?.pcs_ea_label || '1'
         return {
           ...row,
           material_group_id: mg?.id,
           material_group: mg?.material_group_name,
           lami: mg?.has_lami ? 'Yes' : '-',
-          spec: mg?.spec_label || row.spec || '',
+          spec: nextSpec,
+          item_size: nextItemSize,
           item_color: resolveItemColor(row.item_id),
-          pcs_ea: mg?.pcs_ea_label || '-',
-          unit_weight_kg: computeUnitWeightByMaterialGroup(mg, mg?.spec_label || row.spec || ''),
-          qty_m_or_m2: '-',
-          wt_kg: '-',
+          pcs_ea: nextPcs,
+          unit_weight_kg: computeUnitWeightByMaterialGroup(mg, nextSpec),
+          qty_m_or_m2: computeQtyFromItemSize(nextItemSize),
+          wt_kg: computeWtTextFromValues(
+            computeQtyFromItemSize(nextItemSize),
+            nextPcs,
+            computeUnitWeightByMaterialGroup(mg, nextSpec),
+          ),
         }
       }),
     )
@@ -398,14 +572,93 @@ export default function ProductsPage({ token, notify, t }: Props) {
       prev.map((row) => {
         if (row.key !== rowKey) return row
         const mg = row.material_group_id ? materialGroupById.get(row.material_group_id) : undefined
+        const nextSpec = value || (selectedProduct?.spec_inner || '')
+        const nextItemSize = computeItemSizeByItem(itemById.get(row.item_id), nextSpec)
         return {
           ...row,
           spec: value,
-          unit_weight_kg: computeUnitWeightByMaterialGroup(mg, value),
+          item_size: nextItemSize,
+          unit_weight_kg: computeUnitWeightByMaterialGroup(mg, nextSpec),
+          qty_m_or_m2: computeQtyFromItemSize(nextItemSize),
+          wt_kg: computeWtTextFromValues(
+            computeQtyFromItemSize(nextItemSize),
+            row.pcs_ea,
+            computeUnitWeightByMaterialGroup(mg, nextSpec),
+          ),
         }
       }),
     )
   }
+
+  const onBulkRowLamiChange = (rowKey: number, value: string) => {
+    setBulkSpecRows((prev) => prev.map((row) => (row.key === rowKey ? { ...row, lami: value || '-' } : row)))
+  }
+
+  const onBulkRowItemColorChange = (rowKey: number, value: string) => {
+    setBulkSpecRows((prev) => prev.map((row) => (row.key === rowKey ? { ...row, item_color: value } : row)))
+  }
+
+  const onBulkRowNoteChange = (rowKey: number, value: string) => {
+    setBulkSpecRows((prev) => prev.map((row) => (row.key === rowKey ? { ...row, other_note: value } : row)))
+  }
+
+  const onBulkRowPcsEaChange = (rowKey: number, value: string) => {
+    setBulkSpecRows((prev) =>
+      prev.map((row) => {
+        if (row.key !== rowKey) return row
+        return {
+          ...row,
+          pcs_ea: value,
+          wt_kg: computeWtTextFromValues(row.qty_m_or_m2, value, row.unit_weight_kg),
+        }
+      }),
+    )
+  }
+
+  const onBulkRowItemSizeChange = (rowKey: number, value: string) => {
+    setBulkSpecRows((prev) =>
+      prev.map((row) => {
+        if (row.key !== rowKey) return row
+        return {
+          ...row,
+          item_size: value,
+          qty_m_or_m2: computeQtyFromItemSize(value),
+          wt_kg: computeWtTextFromValues(computeQtyFromItemSize(value), row.pcs_ea, row.unit_weight_kg),
+        }
+      }),
+    )
+  }
+
+  useEffect(() => {
+    if (!showBulkSpecModal || bulkSpecRows.length === 0) return
+    setBulkSpecRows((prev) =>
+      prev.map((row) => {
+        const needsInit = !row.item_size || row.item_size === '-'
+        if (!needsInit) return row
+        const nextSpec = row.spec || (selectedProduct?.spec_inner || '')
+        const nextItemSize = computeItemSizeByItem(itemById.get(row.item_id), nextSpec)
+        return {
+          ...row,
+          item_size: nextItemSize,
+          qty_m_or_m2: computeQtyFromItemSize(nextItemSize),
+          wt_kg: computeWtTextFromValues(computeQtyFromItemSize(nextItemSize), row.pcs_ea, row.unit_weight_kg),
+          item_color: row.item_color || resolveItemColor(row.item_id),
+          other_note: row.other_note || '',
+        }
+      }),
+    )
+  }, [showBulkSpecModal, bulkSpecRows.length, itemById, selectedProduct])
+
+  const getSpecWt = (s: ProductSpec): number | null => {
+    const direct = toFiniteNumber(s.wt_kg)
+    if (direct != null) return direct
+    return computeWtFromValues(s.qty_m_or_m2, s.pcs_ea, s.unit_weight_kg)
+  }
+
+  const totalSpecWt = specs.reduce((sum, s) => {
+    const wt = getSpecWt(s)
+    return sum + (wt ?? 0)
+  }, 0)
 
   const saveBulkSpecs = async () => {
     if (!detailProductId) return
@@ -419,24 +672,22 @@ export default function ProductsPage({ token, notify, t }: Props) {
       return
     }
     try {
-      const maxLineNo = specs.reduce((max, s) => Math.max(max, s.line_no || 0), 0)
-      await Promise.all(
-        bulkSpecRows.map((row, idx) => {
-          const resolvedColor = resolveItemColor(row.item_id)
-          return api(`/api/products/${detailProductId}/specs`, 'POST', {
-            item_id: row.item_id,
-            material_group_id: row.material_group_id,
-            line_no: maxLineNo + idx + 1,
-            lami: row.lami !== '-' ? row.lami : null,
-            spec: row.spec || null,
-            item_color: resolvedColor !== '-' ? resolvedColor : null,
-            pcs_ea: row.pcs_ea !== '-' && row.pcs_ea !== '' && !Number.isNaN(Number(row.pcs_ea)) ? Number(row.pcs_ea) : null,
-            unit_weight_kg: row.unit_weight_kg !== '-' && row.unit_weight_kg !== '' && !Number.isNaN(Number(row.unit_weight_kg)) ? Number(row.unit_weight_kg) : null,
-            qty_m_or_m2: null,
-            wt_kg: null,
-          }, token)
-        }),
-      )
+      for (const row of bulkSpecRows) {
+        const resolvedColor = resolveItemColor(row.item_id)
+        await api(`/api/products/${detailProductId}/specs`, 'POST', {
+          item_id: row.item_id,
+          material_group_id: row.material_group_id,
+          lami: row.lami !== '-' ? row.lami : null,
+          spec: row.spec || null,
+          item_color: resolvedColor !== '-' ? resolvedColor : null,
+          other_note: row.other_note || null,
+          pcs_ea: row.pcs_ea !== '-' && row.pcs_ea !== '' && !Number.isNaN(Number(row.pcs_ea)) ? Number(row.pcs_ea) : null,
+          unit_weight_kg: row.unit_weight_kg !== '-' && row.unit_weight_kg !== '' && !Number.isNaN(Number(row.unit_weight_kg)) ? Number(row.unit_weight_kg) : null,
+          qty_m_or_m2: null,
+          item_size: row.item_size !== '-' ? row.item_size : null,
+          wt_kg: null,
+        }, token)
+      }
       await loadSpecs(detailProductId)
       setShowBulkSpecModal(false)
       setBulkSpecItems([])
@@ -454,6 +705,57 @@ export default function ProductsPage({ token, notify, t }: Props) {
       else next.delete(id)
       return next
     })
+  }
+
+  const updateSpecEditField = (specId: number, field: keyof SpecEditRow, value: string) => {
+    setSpecEdits((prev) => ({
+      ...prev,
+      [specId]: {
+        lami: prev[specId]?.lami ?? '-',
+        spec: prev[specId]?.spec ?? '',
+        item_size: prev[specId]?.item_size ?? '',
+        item_color: prev[specId]?.item_color ?? '',
+        pcs_ea: prev[specId]?.pcs_ea ?? '',
+        other_note: prev[specId]?.other_note ?? '',
+        [field]: value,
+      },
+    }))
+  }
+
+  const saveSpecInline = async (specRow: ProductSpec) => {
+    const draft = specEdits[specRow.id]
+    if (!draft) return
+    const normalizedCurrent = {
+      lami: specRow.lami || '-',
+      spec: specRow.spec || '',
+      item_size: specRow.item_size || '',
+      item_color: specRow.item_color || '',
+      pcs_ea: specRow.pcs_ea != null ? String(specRow.pcs_ea) : '',
+      other_note: specRow.other_note || '',
+    }
+    if (
+      draft.lami === normalizedCurrent.lami
+      && draft.spec === normalizedCurrent.spec
+      && draft.item_size === normalizedCurrent.item_size
+      && draft.item_color === normalizedCurrent.item_color
+      && draft.pcs_ea === normalizedCurrent.pcs_ea
+      && draft.other_note === normalizedCurrent.other_note
+    ) return
+
+    try {
+      await api(`/api/product-specs/${specRow.id}`, 'PUT', {
+        lami: draft.lami !== '-' ? draft.lami : null,
+        spec: draft.spec || null,
+        item_size: draft.item_size || null,
+        item_color: draft.item_color || null,
+        pcs_ea: draft.pcs_ea !== '' && !Number.isNaN(Number(draft.pcs_ea)) ? Number(draft.pcs_ea) : null,
+        other_note: draft.other_note || null,
+      }, token)
+      if (detailProductId) await loadSpecs(detailProductId)
+    } catch (err) {
+      notify((err as Error).message, 'error')
+      if (detailProductId) await loadSpecs(detailProductId)
+    }
   }
 
   const deleteSelectedSpecs = async () => {
@@ -476,6 +778,67 @@ export default function ProductsPage({ token, notify, t }: Props) {
     }
   }
 
+  const openExportExcelModal = () => {
+    setExportMode('form_specification')
+    setSelectedExportSpecIds(new Set(specs.map((s) => s.id)))
+    setShowExportModal(true)
+  }
+
+  const toggleExportSpec = (specId: number, checked: boolean) => {
+    setSelectedExportSpecIds((prev) => {
+      const next = new Set(prev)
+      if (checked) next.add(specId)
+      else next.delete(specId)
+      return next
+    })
+  }
+
+  const exportExcel = async () => {
+    if (!detailProductId) return
+    if (exportMode === 'form_product' && selectedExportSpecIds.size === 0) {
+      notify(t('exportNeedSpec'), 'error')
+      return
+    }
+    try {
+      const res = await fetch(`${API_BASE}/api/products/${detailProductId}/export-excel`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Token ${token}`,
+        },
+        body: JSON.stringify({
+          mode: exportMode,
+          spec_ids: exportMode === 'form_product' ? [...selectedExportSpecIds] : [],
+        }),
+      })
+      if (!res.ok) {
+        const txt = await res.text()
+        let detail = txt
+        try {
+          const parsed = txt ? JSON.parse(txt) : {}
+          detail = parsed.detail || txt
+        } catch {}
+        throw new Error(detail || `HTTP ${res.status}`)
+      }
+      const blob = await res.blob()
+      const contentDisposition = res.headers.get('Content-Disposition') || ''
+      const matched = /filename=\"?([^\";]+)\"?/i.exec(contentDisposition)
+      const fileName = matched?.[1] || `${selectedProduct?.product_code || 'product'}_${exportMode}.xlsx`
+      const url = window.URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = fileName
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      window.URL.revokeObjectURL(url)
+      setShowExportModal(false)
+      notify(t('exportSuccess'), 'success')
+    } catch (err) {
+      notify((err as Error).message, 'error')
+    }
+  }
+
   const uploadImages = async (picked: FileList | File[] | null) => {
     if (!detailProductId || !picked || picked.length === 0) return
     const fd = new FormData()
@@ -484,8 +847,22 @@ export default function ProductsPage({ token, notify, t }: Props) {
     }
     try {
       await api(`/api/products/${detailProductId}/print-versions/upload`, 'POST', fd, token)
-      await loadVersions(detailProductId)
+      await loadPrintImages(detailProductId)
       notify(t('imageUploaded'), 'success')
+    } catch (err) {
+      notify((err as Error).message, 'error')
+    }
+  }
+
+  const deletePrintImage = async (image: PrintImage) => {
+    if (!detailProductId) return
+    try {
+      await api(`/api/print-images/${image.id}`, 'DELETE', undefined, token)
+      if (activeImage?.id === image.id) setActiveImage(null)
+      await loadPrintImages(detailProductId)
+      await loadBase()
+      await loadDetail(detailProductId)
+      notify(t('delete'), 'success')
     } catch (err) {
       notify((err as Error).message, 'error')
     }
@@ -495,21 +872,130 @@ export default function ProductsPage({ token, notify, t }: Props) {
     navigate(`/products/${product.id}`)
   }
 
-  const onPrintImageInput = (e: ChangeEvent<HTMLInputElement>) => {
-    const picked = e.target.files
-    e.currentTarget.value = ''
-    if (picked && picked.length > 0) {
-      void uploadImages(picked)
+  const openPrintImagePicker = () => {
+    const picker = document.createElement('input')
+    picker.type = 'file'
+    picker.accept = 'image/*'
+    picker.multiple = true
+    picker.onchange = () => {
+      const picked = picker.files
+      if (picked && picked.length > 0) {
+        void uploadImages(picked)
+      }
     }
+    picker.click()
   }
 
-  const onPrintDrop = (e: DragEvent<HTMLDivElement>) => {
-    e.preventDefault()
-    if (e.dataTransfer?.files && e.dataTransfer.files.length > 0) {
-      void uploadImages(e.dataTransfer.files)
-      e.dataTransfer.clearData()
-    }
-  }
+  const productFormModal = (
+    <FormModal
+      open={showForm}
+      title={editingId ? t('edit') : t('addProduct')}
+      onClose={() => { setShowForm(false); setForm(productInit); setEditingId(null); setError('') }}
+    >
+      <form onSubmit={saveProduct}>
+        <div className="grid-2">
+          <div className="form-field">
+            <label>{t('lblCustomer')}</label>
+            <Select
+              classNamePrefix="select2"
+              options={customerOptions}
+              value={selectedCustomerOption}
+              onChange={(opt: Option | null) => setForm({ ...form, customer_id: opt ? String(opt.value) : '' })}
+              placeholder={t('phSelectCustomer')}
+              isClearable
+            />
+          </div>
+          <div className="form-field"><label>{t('lblProductCode')}</label><input placeholder={t('phProductCode')} value={form.product_code} onChange={(e) => setForm({ ...form, product_code: e.target.value })} required /></div>
+          <div className="form-field"><label>{t('lblProductName')}</label><input placeholder={t('phProductName')} value={form.product_name} onChange={(e) => setForm({ ...form, product_name: e.target.value })} required /></div>
+          <div className="form-field">
+            <label>{t('lblType')}</label>
+            <select
+              value={typeMode}
+              onChange={(e) => {
+                const next = e.target.value
+                if (next === 'OTHER') {
+                  setForm({ ...form, type: form.type_other || '', type_other: form.type_other || '' })
+                } else {
+                  setForm({ ...form, type: next, type_other: '' })
+                }
+              }}
+            >
+              {PRODUCT_TYPES.map((tp) => <option key={tp} value={tp}>{tp}</option>)}
+              <option value="OTHER">{t('other').toUpperCase()}</option>
+            </select>
+          </div>
+          {typeMode === 'OTHER' ? (
+            <div className="form-field">
+              <label>{t('other').toUpperCase()}</label>
+              <input value={form.type_other} onChange={(e) => setForm({ ...form, type_other: e.target.value.toUpperCase(), type: e.target.value.toUpperCase() })} />
+            </div>
+          ) : null}
+          <div className="form-field">
+            <label>{t('lblSewingType')}</label>
+            <select
+              value={sewingMode}
+              onChange={(e) => {
+                const next = e.target.value
+                if (next === 'OTHER') {
+                  setForm({ ...form, sewing_type: form.sewing_type_other || '', sewing_type_other: form.sewing_type_other || '' })
+                } else {
+                  setForm({ ...form, sewing_type: next, sewing_type_other: '' })
+                }
+              }}
+            >
+              {SEWING_TYPES.map((tp) => <option key={tp} value={tp}>{tp}</option>)}
+              <option value="OTHER">{t('other').toUpperCase()}</option>
+            </select>
+          </div>
+          {sewingMode === 'OTHER' ? (
+            <div className="form-field">
+              <label>{t('other').toUpperCase()}</label>
+              <input value={form.sewing_type_other} onChange={(e) => setForm({ ...form, sewing_type_other: e.target.value.toUpperCase(), sewing_type: e.target.value.toUpperCase() })} />
+            </div>
+          ) : null}
+          <div className="form-field">
+            <label>{t('lblPrint')}</label>
+            <select value={form.print} onChange={(e) => setForm({ ...form, print: e.target.value })}>
+              <option value="yes">{t('yes')}</option>
+              <option value="no">{t('no')}</option>
+            </select>
+          </div>
+          <div className="form-field"><label>{t('lblSwl')}</label><input placeholder={t('phSwl')} value={form.swl} onChange={(e) => setForm({ ...form, swl: e.target.value })} /></div>
+          <div className="form-field"><label>{t('lblColor')}</label><input placeholder={t('phColor')} value={form.color} onChange={(e) => setForm({ ...form, color: e.target.value })} /></div>
+          <div className="form-field"><label>{t('lblLiner')}</label><input placeholder={t('phLiner')} value={form.liner} onChange={(e) => setForm({ ...form, liner: e.target.value })} /></div>
+          <div className="form-field">
+            <label>{t('lblTop')}</label>
+            <div className="input-adorn">
+              <span>Ø</span>
+              <input placeholder={t('phTop')} value={form.top} onChange={(e) => setForm({ ...form, top: e.target.value })} />
+            </div>
+          </div>
+          <div className="form-field">
+            <label>{t('lblBottom')}</label>
+            <div className="input-adorn">
+              <span>Ø</span>
+              <input placeholder={t('phBottom')} value={form.bottom} onChange={(e) => setForm({ ...form, bottom: e.target.value })} />
+            </div>
+          </div>
+          <div className="form-field">
+            <label>{t('lblPacking')}</label>
+            <div className="input-adorn">
+              <input placeholder={t('phPacking')} value={form.packing} onChange={(e) => setForm({ ...form, packing: e.target.value })} />
+              <span>PCS</span>
+            </div>
+          </div>
+          <div className="form-field"><label>{t('lblSpecOther')}</label><input placeholder={t('phSpecOther')} value={form.spec_other} onChange={(e) => setForm({ ...form, spec_other: e.target.value })} /></div>
+          <div className="form-field"><label>{t('lblSpecInner')}</label><input placeholder={t('phSpecInner')} value={form.spec_inner} onChange={(e) => setForm({ ...form, spec_inner: e.target.value })} /></div>
+          <div className="form-field full-width"><label>{t('lblOtherNote')}</label><textarea placeholder={t('phOtherNote')} value={form.other_note} onChange={(e) => setForm({ ...form, other_note: e.target.value })} /></div>
+        </div>
+        {error ? <div className="error">{error}</div> : null}
+        <div className="row form-actions">
+          <button className="primary" type="submit">{t('save')}</button>
+          <button type="button" onClick={() => { setShowForm(false); setForm(productInit); setEditingId(null); setError('') }}>{t('cancel')}</button>
+        </div>
+      </form>
+    </FormModal>
+  )
 
   if (isDetailPage) {
     const specPageIds = specs.map((s) => s.id)
@@ -528,7 +1014,19 @@ export default function ProductsPage({ token, notify, t }: Props) {
       <div className="page-content">
         <div className="row toolbar-row">
           <strong>{selectedProduct ? `${t('productDetail')}: ${selectedProduct.product_code}` : t('productDetail')}</strong>
-          <button type="button" className="toolbar-add-btn" onClick={() => navigate('/products')}>{t('close')}</button>
+          <div className="row action-row toolbar-add-btn">
+            {selectedProduct ? (
+              <button type="button" className="primary-light" onClick={openExportExcelModal}>
+                <FileSpreadsheet size={15} /> {t('exportExcel')}
+              </button>
+            ) : null}
+            {selectedProduct ? (
+              <button type="button" className="primary-light" onClick={() => startEditProduct(selectedProduct)}>
+                <Pencil size={15} /> {t('edit')}
+              </button>
+            ) : null}
+            <button type="button" onClick={() => navigate('/products')}>{t('close')}</button>
+          </div>
         </div>
 
         {selectedProduct ? (
@@ -571,32 +1069,144 @@ export default function ProductsPage({ token, notify, t }: Props) {
                 <thead>
                   <tr>
                     <th><input type="checkbox" checked={allSpecsSelected} onChange={(e) => toggleSelectAllSpecs(e.target.checked)} /></th>
-                    <th>{t('colItemName')}</th><th>{t('colMaterialGroup')}</th><th>{t('fldLami')}</th><th>{t('fldSpec')}</th><th>{t('fldItemColor')}</th><th>{t('fldPcsEa')}</th><th>{t('colUnitWeightKg')}</th><th>{t('colQtyMOrM2')}</th><th>{t('colWtKg')}</th>
+                    <th>{t('colItemName')}</th><th>{t('colMaterialGroup')}</th><th className="col-lami">{t('fldLami')}</th><th className="col-spec">{t('fldSpec')}</th><th className="col-item-size">{t('fldItemSize')}</th><th className="col-item-color">{t('fldItemColor')}</th><th>{t('fldPcsEa')}</th><th>{t('colUnitWeightKg')}</th><th>{t('colQtyMOrM2')}</th><th>{t('colWtKg')}</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {specs.length > 0 ? specs.map((s) => (
-                    <tr key={s.id}><td><input type="checkbox" checked={selectedSpecIds.has(s.id)} onChange={(e) => toggleSelectSpecRow(s.id, e.target.checked)} /></td><td>{s.item_name}</td><td>{s.material_group || '-'}</td><td>{renderLamiIcon(s.lami)}</td><td>{s.spec || '-'}</td><td>{s.item_color || '-'}</td><td>{s.pcs_ea ?? '-'}</td><td>{s.unit_weight_kg ?? '-'}</td><td>{s.qty_m_or_m2 ?? '-'}</td><td>{s.wt_kg ?? '-'}</td></tr>
-                  )) : <tr><td className="empty-cell" colSpan={10}>{t('noData')}</td></tr>}
+                  {specs.length > 0 ? specs.flatMap((s) => ([
+                    <tr key={`${s.id}-main`}>
+                        <td><input type="checkbox" checked={selectedSpecIds.has(s.id)} onChange={(e) => toggleSelectSpecRow(s.id, e.target.checked)} /></td>
+                        <td>{s.item_name}</td>
+                        <td>{s.material_group || '-'}</td>
+                        <td className="spec-edit-lami">
+                          <select
+                            value={specEdits[s.id]?.lami ?? (s.lami || '-')}
+                            onChange={(e) => updateSpecEditField(s.id, 'lami', e.target.value)}
+                            onBlur={() => void saveSpecInline(s)}
+                          >
+                            <option value="-">-</option>
+                            <option value="Yes">Yes</option>
+                            <option value="No">No</option>
+                          </select>
+                        </td>
+                        <td className="spec-edit-spec">
+                          <input
+                            value={specEdits[s.id]?.spec ?? (s.spec || '')}
+                            onChange={(e) => updateSpecEditField(s.id, 'spec', e.target.value)}
+                            onBlur={() => void saveSpecInline(s)}
+                          />
+                        </td>
+                        <td className="spec-edit-size">
+                          <input
+                            value={specEdits[s.id]?.item_size ?? (s.item_size || '')}
+                            onChange={(e) => updateSpecEditField(s.id, 'item_size', e.target.value)}
+                            onBlur={() => void saveSpecInline(s)}
+                            placeholder={t('fldItemSize')}
+                          />
+                        </td>
+                        <td className="spec-edit-color">
+                          <input
+                            value={specEdits[s.id]?.item_color ?? (s.item_color || '')}
+                            onChange={(e) => updateSpecEditField(s.id, 'item_color', e.target.value)}
+                            onBlur={() => void saveSpecInline(s)}
+                            placeholder={t('phColor')}
+                          />
+                        </td>
+                        <td>
+                          <input
+                            value={specEdits[s.id]?.pcs_ea ?? (s.pcs_ea != null ? String(s.pcs_ea) : '')}
+                            onChange={(e) => updateSpecEditField(s.id, 'pcs_ea', e.target.value)}
+                            onBlur={() => void saveSpecInline(s)}
+                            placeholder={t('fldPcsEa')}
+                          />
+                        </td>
+                        <td>{s.unit_weight_kg ?? '-'}</td>
+                        <td>{s.qty_m_or_m2 ?? '-'}</td>
+                        <td>{formatNumberMax5(getSpecWt(s))}</td>
+                    </tr>,
+                    <tr className="spec-note-row" key={`${s.id}-note`}>
+                        <td colSpan={5}>
+                          <div className="spec-note-wrap">
+                            <span>{t('lblOtherNote')}:</span>
+                            <input
+                              value={specEdits[s.id]?.other_note ?? (s.other_note || '')}
+                              onChange={(e) => updateSpecEditField(s.id, 'other_note', e.target.value)}
+                              onBlur={() => void saveSpecInline(s)}
+                              placeholder={t('lblOtherNote')}
+                            />
+                          </div>
+                        </td>
+                        <td colSpan={6} />
+                    </tr>,
+                  ])) : <tr><td className="empty-cell" colSpan={11}>{t('noData')}</td></tr>}
+                  {specs.length > 0 ? (
+                    <tr className="summary-row">
+                      <td colSpan={10} className="summary-label">{t('totalWtKg')}</td>
+                      <td className="summary-value">{formatNumberMax5(totalSpecWt)}</td>
+                    </tr>
+                  ) : null}
                 </tbody>
               </table>
             </div>
           </div>
-          <div className="product-detail-print">
-            <div className="small" style={{ marginBottom: 8 }}><strong>{t('tabPrintImages')}</strong></div>
-            <input ref={printImageUploadRef} type="file" multiple accept="image/*" style={{ display: 'none' }} onChange={onPrintImageInput} />
-            {images.length > 0 ? (
-              <div className="product-detail-print-gallery">
-                {images.map((img) => <img key={img.id} src={img.image_url} alt={img.file_name} style={{ width: 86, height: 86, objectFit: 'cover', borderRadius: 8, border: '1px solid #cbd5e1' }} />)}
-              </div>
-            ) : (
-              <div className="product-detail-upload-dropzone" onDragOver={(e) => e.preventDefault()} onDrop={onPrintDrop} onClick={() => printImageUploadRef.current?.click()}>
-                <Upload size={18} />
-                <span>{t('dropOrClickUpload')}</span>
-              </div>
-            )}
-          </div>
         </div>
+        <div className="product-detail-print product-detail-print-below">
+          <div className="row toolbar-row">
+            <strong>{t('tabPrintImages')}</strong>
+            <button type="button" className="primary-light" onClick={openPrintImagePicker}>
+              <Upload size={15} /> Upload
+            </button>
+          </div>
+          {images.length > 0 ? (
+            <div className="product-detail-print-gallery-grid">
+              {images.map((img) => (
+                <div key={img.id} className="print-gallery-item">
+                  <button
+                    type="button"
+                    className="print-gallery-delete-btn"
+                    onClick={() => void deletePrintImage(img)}
+                    title={t('delete')}
+                    aria-label={t('delete')}
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    className="print-gallery-open-btn"
+                    onClick={() => setActiveImage(img)}
+                    title={t('detail')}
+                    aria-label={t('detail')}
+                  >
+                    <img src={img.image_url} alt={img.file_name || `image-${img.id}`} className="print-gallery-thumb" />
+                  </button>
+                  <div className="print-gallery-meta">
+                    <span>{`V${img.version_no ?? '-'}`}</span>
+                    <span title={img.file_name || ''}>{img.file_name || '-'}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : <div className="small">{t('noData')}</div>}
+        </div>
+        {activeImage ? (
+          <div className="image-lightbox-overlay" onClick={() => setActiveImage(null)}>
+            <button
+              type="button"
+              className="image-lightbox-close"
+              onClick={(e) => { e.stopPropagation(); setActiveImage(null) }}
+              aria-label={t('close')}
+              title={t('close')}
+            >
+              <X size={20} />
+            </button>
+            <img
+              src={activeImage.image_url}
+              alt={activeImage.file_name || `image-${activeImage.id}`}
+              className="image-lightbox-content"
+              onClick={(e) => e.stopPropagation()}
+            />
+          </div>
+        ) : null}
 
         <FormModal
           open={showBulkSpecModal && !!selectedProduct}
@@ -622,23 +1232,39 @@ export default function ProductsPage({ token, notify, t }: Props) {
             <table>
               <thead>
                 <tr>
-                  <th>{t('colItemName')}</th><th>{t('colMaterialGroup')}</th><th>{t('fldLami')}</th><th>{t('fldSpec')}</th><th>{t('fldItemColor')}</th><th>{t('fldPcsEa')}</th><th>{t('colUnitWeightKg')}</th><th>{t('colQtyMOrM2')}</th><th>{t('colWtKg')}</th>
+                  <th>{t('colItemName')}</th><th>{t('colMaterialGroup')}</th><th>{t('fldLami')}</th><th>{t('fldSpec')}</th><th>{t('fldItemSize')}</th><th>{t('fldItemColor')}</th><th>{t('fldPcsEa')}</th><th>{t('colUnitWeightKg')}</th><th>{t('colQtyMOrM2')}</th><th>{t('colWtKg')}</th>
                 </tr>
               </thead>
               <tbody>
-                {bulkSpecRows.length > 0 ? bulkSpecRows.map((row) => (
-                  <tr key={row.key}>
-                    <td>{row.item_name}</td>
-                    <td><select value={row.material_group_id || ''} onChange={(e) => onBulkRowMaterialGroupChange(row.key, e.target.value)}><option value="">--</option>{materialGroups.map((mg) => <option key={mg.id} value={mg.id}>{mg.material_group_name}</option>)}</select></td>
-                    <td>{renderLamiIcon(row.lami)}</td>
-                    <td><input value={row.spec} onChange={(e) => onBulkRowSpecChange(row.key, e.target.value)} /></td>
-                    <td>{row.item_color || '-'}</td>
-                    <td>{row.pcs_ea || '-'}</td>
-                    <td>{row.unit_weight_kg}</td>
-                    <td>{row.qty_m_or_m2}</td>
-                    <td>{row.wt_kg}</td>
-                  </tr>
-                )) : <tr><td className="empty-cell" colSpan={9}>{t('noData')}</td></tr>}
+                {bulkSpecRows.length > 0 ? bulkSpecRows.flatMap((row) => ([
+                  <tr key={`${row.key}-main`}>
+                      <td>{row.item_name}</td>
+                      <td><select value={row.material_group_id || ''} onChange={(e) => onBulkRowMaterialGroupChange(row.key, e.target.value)}><option value="">--</option>{materialGroups.map((mg) => <option key={mg.id} value={mg.id}>{mg.material_group_name}</option>)}</select></td>
+                      <td>
+                        <select value={row.lami} onChange={(e) => onBulkRowLamiChange(row.key, e.target.value)}>
+                          <option value="-">-</option>
+                          <option value="Yes">Yes</option>
+                          <option value="No">No</option>
+                        </select>
+                      </td>
+                      <td><input value={row.spec} onChange={(e) => onBulkRowSpecChange(row.key, e.target.value)} /></td>
+                      <td><input value={row.item_size} onChange={(e) => onBulkRowItemSizeChange(row.key, e.target.value)} placeholder={t('fldItemSize')} /></td>
+                      <td><input value={row.item_color} onChange={(e) => onBulkRowItemColorChange(row.key, e.target.value)} placeholder={t('phColor')} /></td>
+                      <td><input value={row.pcs_ea} onChange={(e) => onBulkRowPcsEaChange(row.key, e.target.value)} placeholder={t('fldPcsEa')} /></td>
+                      <td>{row.unit_weight_kg}</td>
+                      <td>{row.qty_m_or_m2}</td>
+                      <td>{row.wt_kg}</td>
+                  </tr>,
+                  <tr className="spec-note-row" key={`${row.key}-note`}>
+                      <td colSpan={5}>
+                        <div className="spec-note-wrap">
+                          <span>{t('lblOtherNote')}:</span>
+                          <input value={row.other_note} onChange={(e) => onBulkRowNoteChange(row.key, e.target.value)} placeholder={t('lblOtherNote')} />
+                        </div>
+                      </td>
+                      <td colSpan={5} />
+                  </tr>,
+                ])) : <tr><td className="empty-cell" colSpan={10}>{t('noData')}</td></tr>}
               </tbody>
             </table>
           </div>
@@ -656,6 +1282,67 @@ export default function ProductsPage({ token, notify, t }: Props) {
           onConfirm={() => void deleteSelectedSpecs()}
           onCancel={() => setShowBulkSpecDeleteConfirm(false)}
         />
+        <FormModal
+          open={showExportModal}
+          title={t('exportExcel')}
+          onClose={() => setShowExportModal(false)}
+        >
+          <div className="form-field">
+            <label>{t('exportMode')}</label>
+            <div className="row action-row">
+              <label className="choice-radio-item">
+                <input
+                  type="radio"
+                  name="export_mode"
+                  checked={exportMode === 'form_product'}
+                  onChange={() => setExportMode('form_product')}
+                />
+                <span>{t('exportFormProduct')}</span>
+              </label>
+              <label className="choice-radio-item">
+                <input
+                  type="radio"
+                  name="export_mode"
+                  checked={exportMode === 'form_specification'}
+                  onChange={() => setExportMode('form_specification')}
+                />
+                <span>{t('exportFormSpecification')}</span>
+              </label>
+            </div>
+          </div>
+          {exportMode === 'form_product' ? (
+            <div className="form-field">
+              <label>{t('exportChooseSpecs')}</label>
+              <div className="table-wrap" style={{ maxHeight: 260 }}>
+                <table>
+                  <thead>
+                    <tr>
+                      <th style={{ width: 40 }} />
+                      <th>{t('colItemName')}</th>
+                      <th>{t('fldSpec')}</th>
+                      <th>{t('fldItemColor')}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {specs.length > 0 ? specs.map((s) => (
+                      <tr key={s.id}>
+                        <td><input type="checkbox" checked={selectedExportSpecIds.has(s.id)} onChange={(e) => toggleExportSpec(s.id, e.target.checked)} /></td>
+                        <td>{s.item_name}</td>
+                        <td>{s.spec || '-'}</td>
+                        <td>{s.item_color || '-'}</td>
+                      </tr>
+                    )) : <tr><td className="empty-cell" colSpan={4}>{t('noData')}</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : null}
+          <div className="row form-actions">
+            <button className="primary" type="button" onClick={() => void exportExcel()}>{t('exportExcel')}</button>
+            <button type="button" onClick={() => setShowExportModal(false)}>{t('cancel')}</button>
+          </div>
+        </FormModal>
+        {productFormModal}
       </div>
     )
   }
@@ -759,15 +1446,6 @@ export default function ProductsPage({ token, notify, t }: Props) {
                     </button>
                     <button
                       type="button"
-                      className="icon-btn"
-                      title={t('edit')}
-                      aria-label={t('edit')}
-                      onClick={() => startEditProduct(p)}
-                    >
-                      <Pencil size={14} />
-                    </button>
-                    <button
-                      type="button"
                       className="danger-light icon-btn"
                       title={t('delete')}
                       aria-label={t('delete')}
@@ -822,114 +1500,7 @@ export default function ProductsPage({ token, notify, t }: Props) {
         onConfirm={() => void deleteSelectedProducts()}
         onCancel={() => setShowBulkDeleteConfirm(false)}
       />
-      <FormModal
-        open={showForm}
-        title={editingId ? t('edit') : t('addProduct')}
-        onClose={() => { setShowForm(false); setForm(productInit); setEditingId(null); setError('') }}
-      >
-        <form onSubmit={saveProduct}>
-          <div className="grid-2">
-            <div className="form-field">
-              <label>{t('lblCustomer')}</label>
-              <Select
-                classNamePrefix="select2"
-                options={customerOptions}
-                value={selectedCustomerOption}
-                onChange={(opt: Option | null) => setForm({ ...form, customer_id: opt ? String(opt.value) : '' })}
-                placeholder={t('phSelectCustomer')}
-                isClearable
-              />
-            </div>
-            <div className="form-field"><label>{t('lblProductCode')}</label><input placeholder={t('phProductCode')} value={form.product_code} onChange={(e) => setForm({ ...form, product_code: e.target.value })} required /></div>
-            <div className="form-field"><label>{t('lblProductName')}</label><input placeholder={t('phProductName')} value={form.product_name} onChange={(e) => setForm({ ...form, product_name: e.target.value })} required /></div>
-            <div className="form-field">
-              <label>{t('lblType')}</label>
-              <select
-                value={typeMode}
-                onChange={(e) => {
-                  const next = e.target.value
-                  if (next === 'OTHER') {
-                    setForm({ ...form, type: form.type_other || '', type_other: form.type_other || '' })
-                  } else {
-                    setForm({ ...form, type: next, type_other: '' })
-                  }
-                }}
-              >
-                {PRODUCT_TYPES.map((tp) => <option key={tp} value={tp}>{tp}</option>)}
-                <option value="OTHER">{t('other').toUpperCase()}</option>
-              </select>
-            </div>
-            {typeMode === 'OTHER' ? (
-              <div className="form-field">
-                <label>{t('other').toUpperCase()}</label>
-                <input value={form.type_other} onChange={(e) => setForm({ ...form, type_other: e.target.value.toUpperCase(), type: e.target.value.toUpperCase() })} />
-              </div>
-            ) : null}
-            <div className="form-field">
-              <label>{t('lblSewingType')}</label>
-              <select
-                value={sewingMode}
-                onChange={(e) => {
-                  const next = e.target.value
-                  if (next === 'OTHER') {
-                    setForm({ ...form, sewing_type: form.sewing_type_other || '', sewing_type_other: form.sewing_type_other || '' })
-                  } else {
-                    setForm({ ...form, sewing_type: next, sewing_type_other: '' })
-                  }
-                }}
-              >
-                {SEWING_TYPES.map((tp) => <option key={tp} value={tp}>{tp}</option>)}
-                <option value="OTHER">{t('other').toUpperCase()}</option>
-              </select>
-            </div>
-            {sewingMode === 'OTHER' ? (
-              <div className="form-field">
-                <label>{t('other').toUpperCase()}</label>
-                <input value={form.sewing_type_other} onChange={(e) => setForm({ ...form, sewing_type_other: e.target.value.toUpperCase(), sewing_type: e.target.value.toUpperCase() })} />
-              </div>
-            ) : null}
-            <div className="form-field">
-              <label>{t('lblPrint')}</label>
-              <select value={form.print} onChange={(e) => setForm({ ...form, print: e.target.value })}>
-                <option value="yes">{t('yes')}</option>
-                <option value="no">{t('no')}</option>
-              </select>
-            </div>
-            <div className="form-field"><label>{t('lblSwl')}</label><input placeholder={t('phSwl')} value={form.swl} onChange={(e) => setForm({ ...form, swl: e.target.value })} /></div>
-            <div className="form-field"><label>{t('lblColor')}</label><input placeholder={t('phColor')} value={form.color} onChange={(e) => setForm({ ...form, color: e.target.value })} /></div>
-            <div className="form-field"><label>{t('lblLiner')}</label><input placeholder={t('phLiner')} value={form.liner} onChange={(e) => setForm({ ...form, liner: e.target.value })} /></div>
-            <div className="form-field">
-              <label>{t('lblTop')}</label>
-              <div className="input-adorn">
-                <span>Ø</span>
-                <input placeholder={t('phTop')} value={form.top} onChange={(e) => setForm({ ...form, top: e.target.value })} />
-              </div>
-            </div>
-            <div className="form-field">
-              <label>{t('lblBottom')}</label>
-              <div className="input-adorn">
-                <span>Ø</span>
-                <input placeholder={t('phBottom')} value={form.bottom} onChange={(e) => setForm({ ...form, bottom: e.target.value })} />
-              </div>
-            </div>
-            <div className="form-field">
-              <label>{t('lblPacking')}</label>
-              <div className="input-adorn">
-                <input placeholder={t('phPacking')} value={form.packing} onChange={(e) => setForm({ ...form, packing: e.target.value })} />
-                <span>PCS</span>
-              </div>
-            </div>
-            <div className="form-field"><label>{t('lblSpecOther')}</label><input placeholder={t('phSpecOther')} value={form.spec_other} onChange={(e) => setForm({ ...form, spec_other: e.target.value })} /></div>
-            <div className="form-field"><label>{t('lblSpecInner')}</label><input placeholder={t('phSpecInner')} value={form.spec_inner} onChange={(e) => setForm({ ...form, spec_inner: e.target.value })} /></div>
-            <div className="form-field full-width"><label>{t('lblOtherNote')}</label><textarea placeholder={t('phOtherNote')} value={form.other_note} onChange={(e) => setForm({ ...form, other_note: e.target.value })} /></div>
-          </div>
-          {error ? <div className="error">{error}</div> : null}
-          <div className="row form-actions">
-            <button className="primary" type="submit">{t('save')}</button>
-            <button type="button" onClick={() => { setShowForm(false); setForm(productInit); setEditingId(null); setError('') }}>{t('cancel')}</button>
-          </div>
-        </form>
-      </FormModal>
+      {productFormModal}
     </div>
   )
 }

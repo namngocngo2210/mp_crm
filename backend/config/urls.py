@@ -1,6 +1,6 @@
 from django.conf import settings
 from django.conf.urls.static import static
-from django.urls import path
+from django.urls import path, re_path
 
 from app import views
 
@@ -26,12 +26,20 @@ urlpatterns = [
     path("api/products", views.products),
     path("api/products/import-excel", views.products_import_excel),
     path("api/products/<int:item_id>", views.product_detail),
+    path("api/products/<int:product_id>/export-excel", views.product_export_excel),
     path("api/products/<int:product_id>/specs", views.product_specs),
     path("api/products/<int:product_id>/specs/import-excel", views.product_specs_import_excel),
     path("api/product-specs/<int:spec_id>", views.product_spec_detail),
     path("api/products/<int:product_id>/print-versions", views.product_print_versions),
+    path("api/products/<int:product_id>/print-images", views.product_print_images),
     path("api/products/<int:product_id>/print-versions/upload", views.product_print_upload),
     path("api/print-versions/<int:version_id>", views.print_version_detail),
+    path("api/print-images/<int:image_id>", views.print_image_detail),
     path("api/production-plans", views.production_plans),
     path("api/production-plans/<int:item_id>", views.production_plan_detail),
 ] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+
+urlpatterns += [
+    path("", views.frontend_app),
+    re_path(r"^(?P<path>(?!api/|media/).*)$", views.frontend_app),
+]

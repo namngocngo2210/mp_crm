@@ -41,3 +41,8 @@ coverage/
 *.log
 .tmp/
 tmp/
+releases/
+backend/build/
+backend/dist/
+backend/*.spec
+frontend/tsconfig.tsbuildinfo

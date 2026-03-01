@@ -9,6 +9,25 @@ import FormModal from '../components/FormModal'
 type Props = { token: string; notify: (message: string, type: 'success' | 'error') => void; t: (key: I18nKey) => string }
 
 const PAGE_SIZE_OPTIONS = [5, 10]
+const FORMULA_ALLOWED_REGEX = /^[A-Za-z0-9_+\-*/().\s]+$/
+const SPEC_ABC_REGEX = /^\s*[^*]+\s*\*\s*\d+(\.\d+)?\s*\*\s*\d+(\.\d+)?\s*$/
+const SPEC_AB_REGEX = /^\s*[^*]+\s*\*\s*\d+(\.\d+)?\s*$/
+const A_NUMBER_REGEX = /[-+]?\d+(\.\d+)?/
+const SPLIT_TOP_STAR = (expr: string) => {
+  let depth = 0
+  for (let i = 0; i < expr.length; i += 1) {
+    const ch = expr[i]
+    if (ch === '(') depth += 1
+    else if (ch === ')') depth -= 1
+    else if (ch === '*' && depth === 0) {
+      const left = expr.slice(0, i).trim()
+      const right = expr.slice(i + 1).trim()
+      if (!left || !right) return null
+      return { left, right }
+    }
+  }
+  return null
+}
 
 export default function ItemsPage({ token, notify, t }: Props) {
   const [rows, setRows] = useState<Item[]>([])
@@ -22,6 +41,12 @@ export default function ItemsPage({ token, notify, t }: Props) {
   const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false)
   const [itemName, setItemName] = useState('')
   const [itemColor, setItemColor] = useState('')
+  const [itemSizeMode, setItemSizeMode] = useState<'fixed' | 'formula'>('fixed')
+  const [itemSizeFixedType, setItemSizeFixedType] = useState<'number' | 'ab'>('number')
+  const [itemSizeValue, setItemSizeValue] = useState('')
+  const [itemSizeFormula, setItemSizeFormula] = useState('')
+  const [itemSizeSourceField, setItemSizeSourceField] = useState<'spec_inner' | 'top' | 'bottom' | 'liner'>('spec_inner')
+  const [itemSizePreviewSource, setItemSizePreviewSource] = useState('')
   const firstRun = useRef(true)
 
   const load = async () => {
@@ -46,22 +71,115 @@ export default function ItemsPage({ token, notify, t }: Props) {
     setSelectedIds((prev) => new Set([...prev].filter((id) => valid.has(id))))
   }, [rows])
 
+  const expectedSourceHint = itemSizeSourceField === 'top' || itemSizeSourceField === 'bottom' ? 'A*B' : 'A*B*C'
+  const sourceDescription =
+    itemSizeSourceField === 'top'
+      ? t('descItemSizeTop')
+      : itemSizeSourceField === 'bottom'
+        ? t('descItemSizeBottom')
+        : itemSizeSourceField === 'liner'
+          ? t('descItemSizeLiner')
+          : t('descItemSizeSpecInner')
+
+  const computeItemSizePreview = () => {
+    if (itemSizeMode !== 'formula') return '-'
+    const expr = itemSizeFormula.trim()
+    const src = itemSizePreviewSource.trim()
+    if (!src) return '-'
+    if (itemSizeSourceField === 'liner' && !expr) return src
+    if (!expr || !FORMULA_ALLOWED_REGEX.test(expr)) return '-'
+    const pair = SPLIT_TOP_STAR(expr)
+    if (!pair) return '-'
+    const isAB = itemSizeSourceField === 'top' || itemSizeSourceField === 'bottom'
+    if (isAB && !SPEC_AB_REGEX.test(src)) return '-'
+    if (!isAB && !SPEC_ABC_REGEX.test(src)) return '-'
+    const parts = src.split('*').map((p) => p.trim())
+    const vars: Record<string, number> = {}
+    const aMatch = (parts[0] || '').match(A_NUMBER_REGEX)
+    const a = aMatch ? Number(aMatch[0]) : Number.NaN
+    if (!Number.isNaN(a)) vars.A = a
+    if (parts.length >= 2) {
+      const b = Number(parts[1])
+      if (!Number.isNaN(b)) vars.B = b
+    }
+    if (parts.length >= 3) {
+      const c = Number(parts[2])
+      if (!Number.isNaN(c)) vars.C = c
+    }
+    const replacedLeft = pair.left
+      .replace(/\bA\b/gi, Number.isNaN(vars.A) ? 'NaN' : `(${String(vars.A)})`)
+      .replace(/\bB\b/gi, vars.B == null ? 'NaN' : `(${String(vars.B)})`)
+      .replace(/\bC\b/gi, vars.C == null ? 'NaN' : `(${String(vars.C)})`)
+    const replacedRight = pair.right
+      .replace(/\bA\b/gi, Number.isNaN(vars.A) ? 'NaN' : `(${String(vars.A)})`)
+      .replace(/\bB\b/gi, vars.B == null ? 'NaN' : `(${String(vars.B)})`)
+      .replace(/\bC\b/gi, vars.C == null ? 'NaN' : `(${String(vars.C)})`)
+    try {
+      // eslint-disable-next-line no-new-func
+      const left = Function(`"use strict"; return (${replacedLeft});`)()
+      // eslint-disable-next-line no-new-func
+      const right = Function(`"use strict"; return (${replacedRight});`)()
+      if (typeof left !== 'number' || Number.isNaN(left) || !Number.isFinite(left)) return '-'
+      if (typeof right !== 'number' || Number.isNaN(right) || !Number.isFinite(right)) return '-'
+      const fmt = (n: number) => String(Number(n.toFixed(6))).replace(/\.0+$/, '')
+      return `${fmt(left)}*${fmt(right)}`
+    } catch {
+      return '-'
+    }
+  }
+
   const save = async (e: FormEvent) => {
     e.preventDefault()
     const name = itemName.trim()
     if (!name) return
+    if (itemSizeMode === 'fixed') {
+      if (itemSizeFixedType === 'number' && (itemSizeValue.trim() === '' || Number.isNaN(Number(itemSizeValue)))) {
+        notify('Item Size (fixed) phải là số', 'error')
+        return
+      }
+      if (itemSizeFixedType === 'ab' && !SPEC_AB_REGEX.test(itemSizeValue.trim())) {
+        notify('Item Size fixed dạng A*B không hợp lệ', 'error')
+        return
+      }
+    }
+    if (itemSizeMode === 'formula' && (!itemSizeFormula.trim() || !FORMULA_ALLOWED_REGEX.test(itemSizeFormula.trim()))) {
+      if (itemSizeSourceField !== 'liner') {
+        notify('Công thức Item Size không hợp lệ. Chỉ dùng A/B/C, số và + - * / ( )', 'error')
+        return
+      }
+    }
+    if (itemSizeMode === 'formula' && itemSizeSourceField !== 'liner' && !SPLIT_TOP_STAR(itemSizeFormula.trim())) {
+      notify('Công thức Item Size phải có dạng (expr1)*(expr2)', 'error')
+      return
+    }
     try {
+      const payload = {
+        item_name: name,
+        item_color: itemColor.trim() || null,
+        item_size_mode: itemSizeMode,
+        item_size_fixed_type: itemSizeMode === 'fixed' ? itemSizeFixedType : 'number',
+        item_size_value: itemSizeMode === 'fixed' && itemSizeFixedType === 'number' ? itemSizeValue.trim() : '',
+        item_size_value_text: itemSizeMode === 'fixed' && itemSizeFixedType === 'ab' ? itemSizeValue.trim() : '',
+        item_size_formula: itemSizeMode === 'formula' ? itemSizeFormula.trim() : '',
+        item_size_source_field: itemSizeMode === 'formula' ? itemSizeSourceField : null,
+      }
       if (editing) {
-        await api(`/api/items/${editing.id}`, 'PUT', { item_name: name, item_color: itemColor.trim() || null }, token)
+        await api(`/api/items/${editing.id}`, 'PUT', payload, token)
         notify(t('itemUpdated'), 'success')
       } else {
-        await api('/api/items', 'POST', { item_name: name, item_color: itemColor.trim() || null }, token)
+        await api('/api/items', 'POST', payload, token)
         notify(t('itemCreated'), 'success')
       }
       setShowForm(false)
       setEditing(null)
       setItemName('')
       setItemColor('')
+      setItemSizeMode('fixed')
+      setItemSizeFixedType('number')
+      setItemSizeValue('')
+      setItemSizeFormula('')
+      setItemSizeSourceField('spec_inner')
+      setItemSizePreviewSource('')
       await load()
     } catch (err) {
       notify((err as Error).message, 'error')
@@ -144,6 +262,12 @@ export default function ItemsPage({ token, notify, t }: Props) {
             setEditing(null)
             setItemName('')
             setItemColor('')
+            setItemSizeMode('fixed')
+            setItemSizeFixedType('number')
+            setItemSizeValue('')
+            setItemSizeFormula('')
+            setItemSizeSourceField('spec_inner')
+            setItemSizePreviewSource('')
             setShowForm(true)
           }}
         >
@@ -158,6 +282,10 @@ export default function ItemsPage({ token, notify, t }: Props) {
               <th><input type="checkbox" checked={allPageSelected} onChange={(e) => toggleSelectAllPage(e.target.checked)} /></th>
               <th>{t('colItem')}</th>
               <th>{t('fldItemColor')}</th>
+              <th>{t('fldItemSizeMode')}</th>
+              <th>{t('fldItemSizeSourceField')}</th>
+              <th>{t('fldItemSizeFormula')}</th>
+              <th>{t('fldItemSizeValue')}</th>
               <th>{t('colUpdatedAt')}</th>
               <th>{t('actions')}</th>
             </tr>
@@ -168,16 +296,57 @@ export default function ItemsPage({ token, notify, t }: Props) {
                 <td><input type="checkbox" checked={selectedIds.has(it.id)} onChange={(e) => toggleSelectRow(it.id, e.target.checked)} /></td>
                 <td>{it.item_name}</td>
                 <td>{it.item_color || '-'}</td>
+                <td>{it.item_size_mode === 'formula' ? t('modeFormula') : t('modeFixed')}</td>
+                <td>
+                  {it.item_size_mode === 'formula'
+                    ? (it.item_size_source_field === 'top'
+                        ? t('srcTop')
+                        : it.item_size_source_field === 'bottom'
+                          ? t('srcBottom')
+                          : it.item_size_source_field === 'liner'
+                            ? t('srcLiner')
+                            : t('srcSpecInner'))
+                    : '-'}
+                </td>
+                <td>{it.item_size_mode === 'formula' ? (it.item_size_formula_code || '-') : '-'}</td>
+                <td>
+                  {it.item_size_mode === 'fixed'
+                    ? (it.item_size_fixed_type === 'ab' ? (it.item_size_value_text || '-') : (it.item_size_value ?? '-'))
+                    : '-'}
+                </td>
                 <td>{it.updated_at}</td>
                 <td>
                   <div className="row action-row">
-                    <button type="button" className="icon-btn" title={t('edit')} aria-label={t('edit')} onClick={() => { setEditing(it); setItemName(it.item_name); setItemColor(it.item_color || ''); setShowForm(true) }}><Pencil size={14} /></button>
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      title={t('edit')}
+                      aria-label={t('edit')}
+                      onClick={() => {
+                        setEditing(it)
+                        setItemName(it.item_name)
+                        setItemColor(it.item_color || '')
+                        setItemSizeMode((it.item_size_mode || 'fixed') as 'fixed' | 'formula')
+                        setItemSizeFixedType((it.item_size_fixed_type || 'number') as 'number' | 'ab')
+                        setItemSizeValue(
+                          it.item_size_mode === 'fixed' && it.item_size_fixed_type === 'ab'
+                            ? (it.item_size_value_text || '')
+                            : (it.item_size_value != null ? String(it.item_size_value) : ''),
+                        )
+                        setItemSizeFormula(it.item_size_formula_code || it.item_size_formula || '')
+                        setItemSizeSourceField((it.item_size_source_field || 'spec_inner') as 'spec_inner' | 'top' | 'bottom' | 'liner')
+                        setItemSizePreviewSource('')
+                        setShowForm(true)
+                      }}
+                    >
+                      <Pencil size={14} />
+                    </button>
                     <button type="button" className="danger-light icon-btn" title={t('delete')} aria-label={t('delete')} onClick={() => setPendingDelete(it)}><Trash2 size={14} /></button>
                   </div>
                 </td>
               </tr>
             )) : (
-              <tr><td className="empty-cell" colSpan={5}>{t('noData')}</td></tr>
+              <tr><td className="empty-cell" colSpan={9}>{t('noData')}</td></tr>
             )}
           </tbody>
         </table>
@@ -209,6 +378,77 @@ export default function ItemsPage({ token, notify, t }: Props) {
           <div className="grid-2">
             <div className="form-field"><label>{t('colItem')}</label><input value={itemName} onChange={(e) => setItemName(e.target.value)} placeholder={t('phItemName')} required /></div>
             <div className="form-field"><label>{t('fldItemColor')}</label><input value={itemColor} onChange={(e) => setItemColor(e.target.value)} placeholder={t('phColor')} /></div>
+            <div className="form-field">
+              <label>{t('fldItemSizeMode')}</label>
+              <select value={itemSizeMode} onChange={(e) => setItemSizeMode(e.target.value as 'fixed' | 'formula')}>
+                <option value="fixed">{t('modeFixed')}</option>
+                <option value="formula">{t('modeFormula')}</option>
+              </select>
+            </div>
+            {itemSizeMode === 'fixed' ? (
+              <>
+                <div className="form-field">
+                  <label>{t('fldItemSizeFixedType')}</label>
+                  <select value={itemSizeFixedType} onChange={(e) => setItemSizeFixedType(e.target.value as 'number' | 'ab')}>
+                    <option value="number">{t('fixedNumber')}</option>
+                    <option value="ab">{t('fixedAB')}</option>
+                  </select>
+                </div>
+                <div className="form-field">
+                  <label>{t('fldItemSizeValue')}</label>
+                  {itemSizeFixedType === 'ab' ? (
+                    <input value={itemSizeValue} onChange={(e) => setItemSizeValue(e.target.value)} placeholder="A*B" required />
+                  ) : (
+                    <input type="number" step="any" value={itemSizeValue} onChange={(e) => setItemSizeValue(e.target.value)} required />
+                  )}
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="form-field">
+                  <label>{t('fldItemSizeSourceField')}</label>
+                  <select
+                    value={itemSizeSourceField}
+                    onChange={(e) => {
+                      const next = e.target.value as 'spec_inner' | 'top' | 'bottom' | 'liner'
+                      setItemSizeSourceField(next)
+                      if (next === 'liner') setItemSizeFormula('')
+                    }}
+                  >
+                    <option value="spec_inner">{t('srcSpecInner')}</option>
+                    <option value="top">{t('srcTop')}</option>
+                    <option value="bottom">{t('srcBottom')}</option>
+                    <option value="liner">{t('srcLiner')}</option>
+                  </select>
+                  <div className="small">{sourceDescription}</div>
+                </div>
+                {itemSizeSourceField !== 'liner' ? (
+                  <div className="form-field">
+                    <label>{t('fldItemSizeFormula')}</label>
+                    <input value={itemSizeFormula} onChange={(e) => setItemSizeFormula(e.target.value)} placeholder={t('phItemSizeFormula')} required />
+                    <div className="small">Biến hỗ trợ: A, B, C. Toán tử: + - * / ( )</div>
+                  </div>
+                ) : (
+                  <div className="form-field">
+                    <label>{t('fldItemSizeFormula')}</label>
+                    <input value="" readOnly placeholder="Lấy trực tiếp từ Liner của Product" />
+                    <div className="small">Liner: không cần công thức, dùng trực tiếp giá trị liner của Product.</div>
+                  </div>
+                )}
+                <div className="form-field">
+                  <label>{t('lblItemSizePreviewSource')}</label>
+                  <input
+                    value={itemSizePreviewSource}
+                    onChange={(e) => setItemSizePreviewSource(e.target.value)}
+                    placeholder={expectedSourceHint}
+                  />
+                </div>
+                <div className="form-field">
+                  <label>{t('lblItemSizePreviewResult')}</label>
+                  <input value={computeItemSizePreview()} readOnly />
+                </div>
+              </>
+            )}
           </div>
           <div className="row form-actions">
             <button className="primary" type="submit">{t('save')}</button>

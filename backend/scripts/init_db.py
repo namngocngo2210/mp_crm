@@ -407,6 +407,12 @@ def ensure_product_columns() -> None:
 def ensure_item_columns() -> None:
     cols_to_add = {
         "item_color": "VARCHAR(100)",
+        "item_size_mode": "VARCHAR(20) NOT NULL DEFAULT 'fixed'",
+        "item_size_fixed_type": "VARCHAR(20) NOT NULL DEFAULT 'number'",
+        "item_size_value": "NUMERIC(12,4)",
+        "item_size_value_text": "VARCHAR(100)",
+        "item_size_formula_code": "VARCHAR(50)",
+        "item_size_source_field": "VARCHAR(30)",
     }
     with engine.begin() as conn:
         item_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(items)")).fetchall()}
@@ -414,6 +420,18 @@ def ensure_item_columns() -> None:
             if col not in item_cols:
                 conn.execute(text(f"ALTER TABLE items ADD COLUMN {col} {ddl}"))
                 print(f"Added {col} to items")
+
+
+def ensure_production_plan_columns() -> None:
+    cols_to_add = {
+        "note": "TEXT",
+    }
+    with engine.begin() as conn:
+        plan_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(production_plans)")).fetchall()}
+        for col, ddl in cols_to_add.items():
+            if col not in plan_cols:
+                conn.execute(text(f"ALTER TABLE production_plans ADD COLUMN {col} {ddl}"))
+                print(f"Added {col} to production_plans")
 
 
 def main() -> None:
@@ -424,6 +442,7 @@ def main() -> None:
     ensure_material_group_schema()
     ensure_product_columns()
     ensure_item_columns()
+    ensure_production_plan_columns()
     with get_session() as session:
         admin = session.scalar(select(User).where(User.username == "admin"))
         if not admin:

@@ -133,6 +133,18 @@ Indexes:
 
 Business note:
 - `qty_m_or_m2`, `wt_kg` là nhập tay, cho phép NULL.
+- `item_size`:
+  - nếu request truyền trực tiếp thì lưu theo giá trị truyền.
+  - nếu request không truyền, backend tự tính theo cấu hình `items` + dữ liệu của `products`:
+    - `item_size_mode = fixed`:
+      - `item_size_fixed_type = number` -> lấy `item_size_value` (dạng số)
+      - `item_size_fixed_type = ab` -> lấy `item_size_value_text` (dạng `A*B`)
+    - `item_size_mode = formula`:
+      - công thức bắt buộc dạng 2 vế: `(expr1)*(expr2)`
+      - kết quả lưu dạng text `A*B` (không nhân ra 1 số)
+      - nguồn dữ liệu theo `item_size_source_field`:
+        - `spec_inner` hoặc `liner`: parse dạng `A*B*C`
+        - `top` hoặc `bottom`: parse dạng `A*B`
 - `unit_weight_kg`:
   - nếu request truyền trực tiếp thì lưu theo giá trị truyền.
   - nếu request không truyền, backend tự tính theo cấu hình `material_groups`:
@@ -145,6 +157,17 @@ Columns:
 - `id` (PK)
 - `item_name` (TEXT, unique, not null)
 - `item_color` (TEXT, null)
+- `item_size_mode` (TEXT, not null, default `fixed`)  
+  Enum: `fixed`, `formula`
+- `item_size_fixed_type` (TEXT, not null, default `number`)  
+  Enum: `number`, `ab`
+- `item_size_value` (DECIMAL(12,4), null)
+- `item_size_value_text` (TEXT, null)  
+  dùng cho fixed kiểu `ab`, ví dụ `101*339`
+- `item_size_formula_code` (TEXT, null)  
+  công thức dạng 2 vế `(expr1)*(expr2)`
+- `item_size_source_field` (TEXT, null)  
+  Enum: `spec_inner`, `top`, `bottom`, `liner`
 - `deleted_at` (DATETIME, null)
 - `created_at` (DATETIME, not null)
 - `updated_at` (DATETIME, not null)

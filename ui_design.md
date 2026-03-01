@@ -135,6 +135,18 @@ Product Specs (cột trái `3/4`):
  - Rule Item Color:
    - ưu tiên `item.item_color`
    - nếu item không có màu thì dùng `product.color`.
+ - Rule Item Size:
+   - nếu nhập tay trong form thêm spec -> dùng giá trị nhập tay.
+   - nếu để trống -> backend tự tính theo cấu hình `item`:
+     - mode `fixed`:
+       - fixed type `number` -> trả số
+       - fixed type `A*B` -> trả text `A*B`
+     - mode `formula`:
+       - công thức bắt buộc dạng `(expr1)*(expr2)`
+       - kết quả luôn là text `A*B` (ví dụ `101*339`)
+       - nguồn dữ liệu lấy theo source field của item:
+         - `spec_inner`, `liner` kỳ vọng dạng `A*B*C`
+         - `top`, `bottom` kỳ vọng dạng `A*B`
  - Rule Unit Weight trong modal thêm spec:
    - mode `fixed` -> lấy `unit_weight_value`
    - mode `choice` -> lấy `unit_weight_options.unit_weight_value`
@@ -173,6 +185,18 @@ Danh sách Material Group:
   - Xóa item (soft delete)
 - Có search realtime + pagination.
 - Có checkbox chọn dòng + nút `Xóa đã chọn`.
+- Form Item Size:
+  - `Item Size Mode`: `fixed` / `formula`
+  - nếu `fixed`:
+    - `Fixed Type`: `number` hoặc `A*B`
+    - `Item Size (fixed)` nhập theo fixed type
+  - nếu `formula`:
+    - chọn `Source Field`: `spec_inner` / `top` / `bottom` / `liner`
+    - hiển thị description định dạng theo source:
+      - `spec_inner`, `liner`: `A*B*C`
+      - `top`, `bottom`: `A*B`
+    - nhập công thức dạng `(expr1)*(expr2)`
+    - có preview source + preview kết quả tương tự Material Group
 
 Print Images (cột phải `1/4`)
 Mục tiêu:

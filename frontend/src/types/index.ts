@@ -43,6 +43,13 @@ export type ProductionPlan = {
   eta?: string
   contp_date?: string
   order_qty_pcs: number
+  spec_inner_snapshot?: string
+  liner_snapshot?: string
+  print_snapshot?: string
+  label?: string
+  sewing_type?: string
+  packing?: string
+  note?: string
   status: string
   update_person?: string
   updated_at?: string
@@ -74,9 +81,13 @@ export type PrintVersion = {
 
 export type PrintImage = {
   id: number
+  product_id?: number
+  version_no?: number
+  product_print_version_id?: number
   image_url: string
   file_name?: string
   sort_order: number
+  created_at?: string
 }
 
 export type MaterialGroup = {
@@ -110,6 +121,13 @@ export type Item = {
   id: number
   item_name: string
   item_color?: string
+  item_size_mode?: 'fixed' | 'formula'
+  item_size_fixed_type?: 'number' | 'ab'
+  item_size_value?: number
+  item_size_value_text?: string
+  item_size_formula_code?: string
+  item_size_formula?: string
+  item_size_source_field?: 'spec_inner' | 'top' | 'bottom' | 'liner'
   updated_at?: string
 }
 

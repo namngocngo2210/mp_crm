@@ -1,6 +1,15 @@
+import os
+import sys
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+if getattr(sys, "frozen", False):
+    APP_HOME = Path(sys.executable).resolve().parent
+    BUNDLE_HOME = Path(getattr(sys, "_MEIPASS", APP_HOME))
+else:
+    APP_HOME = BASE_DIR
+    BUNDLE_HOME = BASE_DIR
+
 SECRET_KEY = "dev-secret-key"
 DEBUG = True
 ALLOWED_HOSTS = ["*"]
@@ -40,6 +49,7 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 CORS_ALLOW_ALL_ORIGINS = True
 
 MEDIA_URL = "/media/"
-MEDIA_ROOT = BASE_DIR / "media"
+MEDIA_ROOT = Path(os.environ.get("MP_CRM_MEDIA_ROOT", str(APP_HOME / "media")))
 
-APP_DB_PATH = BASE_DIR / "data" / "app.db"
+APP_DB_PATH = Path(os.environ.get("MP_CRM_DB_PATH", str(APP_HOME / "data" / "app.db")))
+FRONTEND_DIST_DIR = Path(os.environ.get("MP_CRM_FRONTEND_DIST", str(BUNDLE_HOME / "web")))

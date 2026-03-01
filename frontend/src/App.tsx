@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useRef, useState } from 'react'
-import { CalendarDays, ChevronDown, KeyRound, Layers3, ListChecks, LogOut, Package, PanelLeftClose, PanelLeftOpen, UserRound, Users, UsersRound } from 'lucide-react'
+import { BarChart3, CalendarDays, ChevronDown, KeyRound, Layers3, ListChecks, LogOut, Package, PanelLeftClose, PanelLeftOpen, UserRound, Users, UsersRound } from 'lucide-react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import CustomersPage from './pages/CustomersPage'
 import ProductsPage from './pages/ProductsPage'
@@ -8,8 +8,9 @@ import UnitWeightOptionsPage from './pages/UnitWeightOptionsPage'
 import ItemsPage from './pages/ItemsPage'
 import ProductionPlanPage from './pages/ProductionPlanPage'
 import UserManagementPage from './pages/UserManagementPage'
+import StatisticsPage from './pages/StatisticsPage'
 import { api } from './lib/api'
-import { AppUser } from './types'
+import { AppUser, ProductionPlan } from './types'
 import { Lang, t } from './lib/i18n'
 
 type ToastType = 'success' | 'error'
@@ -17,7 +18,7 @@ type ToastItem = { id: number; message: string; type: ToastType }
 
 type LoginResponse = { token: string; user: AppUser }
 
-const MAIN_ROUTES = ['/customers', '/products', '/material-groups', '/unit-weight-options', '/items', '/plans']
+const MAIN_ROUTES = ['/stats', '/customers', '/products', '/material-groups', '/unit-weight-options', '/items', '/plans']
 
 export default function App() {
   const navigate = useNavigate()
@@ -35,6 +36,7 @@ export default function App() {
   const [toasts, setToasts] = useState<ToastItem[]>([])
   const [me, setMe] = useState<AppUser | null>(null)
   const [menuOpen, setMenuOpen] = useState(false)
+  const [nearEtdPlanCount, setNearEtdPlanCount] = useState(0)
   const menuRef = useRef<HTMLDivElement | null>(null)
 
   const [accountForm, setAccountForm] = useState({ full_name: '', avatar_url: '', role: 'staff' as AppUser['role'] })
@@ -100,6 +102,14 @@ export default function App() {
     })
   }, [token, navigate])
 
+  useEffect(() => {
+    if (!token) {
+      setNearEtdPlanCount(0)
+      return
+    }
+    void refreshNearEtdPlanCount()
+  }, [token, pathname])
+
   const pushToast = (message: string, type: ToastType) => {
     const item: ToastItem = { id: Date.now() + Math.floor(Math.random() * 1000), message, type }
     setToasts((prev) => [...prev, item])
@@ -108,6 +118,37 @@ export default function App() {
     }, 3200)
   }
   const tr = (key: Parameters<typeof t>[1]) => t(lang, key)
+
+  const parseDmyDate = (value?: string) => {
+    if (!value) return null
+    const m = /^(\d{2})-(\d{2})-(\d{4})$/.exec(value.trim())
+    if (!m) return null
+    const d = Number(m[1])
+    const mo = Number(m[2]) - 1
+    const y = Number(m[3])
+    const dt = new Date(y, mo, d)
+    if (Number.isNaN(dt.getTime())) return null
+    return dt
+  }
+
+  const isEtdWithin5Days = (value?: string) => {
+    const etdDate = parseDmyDate(value)
+    if (!etdDate) return false
+    const now = new Date()
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+    const diffDays = Math.floor((etdDate.getTime() - today.getTime()) / 86400000)
+    return diffDays >= 0 && diffDays <= 5
+  }
+
+  const refreshNearEtdPlanCount = async () => {
+    if (!token) return
+    try {
+      const plans = await api<ProductionPlan[]>('/api/production-plans?search=', 'GET', undefined, token)
+      setNearEtdPlanCount(plans.filter((p) => isEtdWithin5Days(p.etd)).length)
+    } catch {
+      setNearEtdPlanCount(0)
+    }
+  }
 
   const doLogout = async () => {
     try {
@@ -287,6 +328,10 @@ export default function App() {
                 <div className="sidebar-brand-text">MINH PHUONG GROUP</div>
               </div>
               <nav className="sidebar-nav">
+                <button className={`side-btn ${pathname === '/stats' ? 'active' : ''}`} type="button" onClick={() => navigate('/stats')}>
+                  <BarChart3 size={15} />
+                  <span className="side-label">{tr('tabStats')}</span>
+                </button>
                 <button className={`side-btn ${pathname === '/customers' ? 'active' : ''}`} type="button" onClick={() => navigate('/customers')}>
                   <Users size={15} />
                   <span className="side-label">{tr('tabCustomers')}</span>
@@ -327,16 +372,18 @@ export default function App() {
                 <button className={`side-btn ${pathname === '/plans' ? 'active' : ''}`} type="button" onClick={() => navigate('/plans')}>
                   <CalendarDays size={15} />
                   <span className="side-label">{tr('tabPlans')}</span>
+                  {nearEtdPlanCount > 0 ? <span className="side-count-badge">({nearEtdPlanCount})</span> : null}
                 </button>
               </nav>
             </aside>
             <div className="content-area">
+              {pathname === '/stats' ? <StatisticsPage token={token} notify={pushToast} t={tr} /> : null}
               {pathname === '/customers' ? <CustomersPage token={token} notify={pushToast} t={tr} /> : null}
               {pathname === '/products' || isProductDetailRoute ? <ProductsPage token={token} notify={pushToast} t={tr} /> : null}
               {pathname === '/material-groups' ? <MaterialGroupsPage token={token} notify={pushToast} t={tr} /> : null}
               {pathname === '/unit-weight-options' ? <UnitWeightOptionsPage token={token} notify={pushToast} t={tr} /> : null}
               {pathname === '/items' ? <ItemsPage token={token} notify={pushToast} t={tr} /> : null}
-              {pathname === '/plans' ? <ProductionPlanPage token={token} notify={pushToast} t={tr} /> : null}
+              {pathname === '/plans' ? <ProductionPlanPage token={token} notify={pushToast} t={tr} onPlansChanged={refreshNearEtdPlanCount} /> : null}
             </div>
           </div>
         ) : null}

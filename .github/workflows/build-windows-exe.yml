@@ -1,0 +1,54 @@
+name: Build Windows EXE
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build Frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Backend Dependencies
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller
+
+      - name: Build Windows EXE
+        working-directory: backend
+        run: |
+          pyinstaller --noconfirm --clean --onefile --name MP_CRM --paths . --add-data "..\frontend\dist;web" launcher.py
+
+      - name: Prepare Release Folder
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path releases/windows/data -Force | Out-Null
+          New-Item -ItemType Directory -Path releases/windows/media -Force | Out-Null
+          Copy-Item backend/dist/MP_CRM.exe releases/windows/MP_CRM.exe -Force
+          if (Test-Path backend/data/app.db) { Copy-Item backend/data/app.db releases/windows/data/app.db -Force }
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mp-crm-windows
+          path: releases/windows
