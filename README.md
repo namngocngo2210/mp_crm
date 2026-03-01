@@ -25,7 +25,7 @@ conda activate mp_crm
 pip install -r backend/requirements.txt
 cd backend
 python scripts/init_db.py
-python manage.py runserver 0.0.0.0:8000
+python manage.py runserver 0.0.0.0:2210
 ```
 
 ## Run Frontend
@@ -36,12 +36,12 @@ npm run dev
 ```
 
 Frontend URL: `http://localhost:5173`  
-Backend URL: `http://localhost:8000`
+Backend URL: `http://localhost:2210`
 
 ## API Quick Check
 ```bash
-curl -s http://localhost:8000/api/health
-curl -s -X POST http://localhost:8000/api/auth/login \
+curl -s http://localhost:2210/api/health
+curl -s -X POST http://localhost:2210/api/auth/login \
   -H 'Content-Type: application/json' \
   -d '{"username":"admin","password":"123456"}'
 ```
