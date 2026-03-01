@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import os
 import socket
+import subprocess
+import sys
 import threading
 import time
 import webbrowser
@@ -37,6 +39,42 @@ def _pick_port(host: str, preferred: int) -> int:
         sock.close()
 
 
+def _wait_until_listening(host: str, port: int, timeout_seconds: float = 12.0) -> bool:
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(0.4)
+        try:
+            sock.connect((host, port))
+            return True
+        except OSError:
+            time.sleep(0.15)
+        finally:
+            sock.close()
+    return False
+
+
+def _open_browser_best_effort(url: str) -> bool:
+    try:
+        if webbrowser.open(url):
+            return True
+    except Exception:
+        pass
+
+    if sys.platform.startswith("win"):
+        try:
+            os.startfile(url)  # type: ignore[attr-defined]
+            return True
+        except Exception:
+            pass
+        try:
+            subprocess.Popen(["cmd", "/c", "start", "", url], shell=False)
+            return True
+        except Exception:
+            pass
+    return False
+
+
 def main() -> None:
     from waitress import serve
     from config.wsgi import application
@@ -52,11 +90,16 @@ def main() -> None:
         print(f"[MP_CRM] Starting on {url}")
 
     def open_browser() -> None:
-        time.sleep(1.2)
-        try:
-            webbrowser.open(url)
-        except Exception:
-            pass
+        ready = _wait_until_listening(browser_host, port, timeout_seconds=15.0)
+        if not ready:
+            print(f"[MP_CRM] Server not ready for browser auto-open: {url}")
+            return
+        for _ in range(5):
+            if _open_browser_best_effort(url):
+                print(f"[MP_CRM] Browser opened: {url}")
+                return
+            time.sleep(0.4)
+        print(f"[MP_CRM] Could not auto-open browser. Please open manually: {url}")
 
     threading.Thread(target=open_browser, daemon=True).start()
     serve(application, host=host, port=port, threads=8)
