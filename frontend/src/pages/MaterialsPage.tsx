@@ -17,11 +17,10 @@ export default function MaterialsPage({ token, notify, t }: Props) {
   const [name, setName] = useState('')
   const [materialCategoryId, setMaterialCategoryId] = useState('')
   const [formula, setFormula] = useState('')
-  const [spec, setSpec] = useState('')
   const [lami, setLami] = useState(false)
   const [pendingDelete, setPendingDelete] = useState<MaterialMaster | null>(null)
   const selectedCategory = categories.find((c) => String(c.id) === materialCategoryId) || null
-  const showFormulaSpec = !!selectedCategory && /vải|vai/i.test(selectedCategory.material_category_name || '')
+  const showFormulaOnly = !!selectedCategory && /vải|vai/i.test(selectedCategory.material_category_name || '')
 
   const load = async () => {
     try {
@@ -53,7 +52,6 @@ export default function MaterialsPage({ token, notify, t }: Props) {
       material_name: name.trim(),
       material_category_id: Number(materialCategoryId),
       formula: formula.trim() || null,
-      spec: spec.trim() || null,
       lami,
     }
     try {
@@ -69,7 +67,6 @@ export default function MaterialsPage({ token, notify, t }: Props) {
       setName('')
       setMaterialCategoryId('')
       setFormula('')
-      setSpec('')
       setLami(false)
       await load()
     } catch (err) {
@@ -101,7 +98,6 @@ export default function MaterialsPage({ token, notify, t }: Props) {
             setName('')
             setMaterialCategoryId('')
             setFormula('')
-            setSpec('')
             setLami(false)
             setShowForm(true)
           }}
@@ -117,7 +113,6 @@ export default function MaterialsPage({ token, notify, t }: Props) {
               <th>Material</th>
               <th>Material Category</th>
               <th>Formula</th>
-              <th>Spec</th>
               <th>Lami</th>
               <th>{t('colCreatedAt')}</th>
               <th>{t('colUpdatedAt')}</th>
@@ -131,7 +126,6 @@ export default function MaterialsPage({ token, notify, t }: Props) {
                 <td>{r.material_name}</td>
                 <td>{r.material_category_name || '-'}</td>
                 <td>{/vải|vai/i.test(r.material_category_name || '') ? (r.formula || '-') : '-'}</td>
-                <td>{/vải|vai/i.test(r.material_category_name || '') ? (r.spec || '-') : '-'}</td>
                 <td>{r.lami ? <CheckCircle2 size={16} className="status-icon yes" /> : <XCircle size={16} className="status-icon no" />}</td>
                 <td>{r.created_at || '-'}</td>
                 <td>{r.updated_at || '-'}</td>
@@ -147,7 +141,6 @@ export default function MaterialsPage({ token, notify, t }: Props) {
                         setName(r.material_name)
                         setMaterialCategoryId(r.material_category_id ? String(r.material_category_id) : '')
                         setFormula(r.formula || '')
-                        setSpec(r.spec || '')
                         setLami(!!r.lami)
                         setShowForm(true)
                       }}
@@ -157,7 +150,7 @@ export default function MaterialsPage({ token, notify, t }: Props) {
                 </td>
               </tr>
             )) : (
-              <tr><td className="empty-cell" colSpan={9}>{t('noData')}</td></tr>
+              <tr><td className="empty-cell" colSpan={8}>{t('noData')}</td></tr>
             )}
           </tbody>
         </table>
@@ -179,17 +172,11 @@ export default function MaterialsPage({ token, notify, t }: Props) {
                 ))}
               </select>
             </div>
-            {showFormulaSpec ? (
-              <>
-                <div className="form-field">
-                  <label>Formula</label>
-                  <input value={formula} onChange={(e) => setFormula(e.target.value)} />
-                </div>
-                <div className="form-field">
-                  <label>Spec</label>
-                  <input value={spec} onChange={(e) => setSpec(e.target.value)} />
-                </div>
-              </>
+            {showFormulaOnly ? (
+              <div className="form-field">
+                <label>Formula</label>
+                <input value={formula} onChange={(e) => setFormula(e.target.value)} />
+              </div>
             ) : null}
             <div className="form-field">
               <label>Lami</label>

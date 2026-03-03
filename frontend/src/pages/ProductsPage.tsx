@@ -9,6 +9,11 @@ import ConfirmModal from '../components/ConfirmModal'
 import FormModal from '../components/FormModal'
 
 type Props = { token: string; notify: (message: string, type: 'success' | 'error') => void; t: (key: I18nKey) => string }
+type FormulaMatrixPayload = {
+  items: Array<{ id: number; item_name: string }>
+  product_types: ProductType[]
+  formulas: Array<{ item_id: number; product_type_id: number; formula: string }>
+}
 
 type Option = { value: number; label: string }
 type BulkSpecRow = {
@@ -47,6 +52,7 @@ const DEFAULT_PRODUCT_TYPES = [
 
 const SEWING_TYPES = ['INSIDE', 'OUTSIDE']
 const SPEC_ABC_REGEX = /^\s*[^*]+\s*\*\s*\d+(\.\d+)?\s*\*\s*\d+(\.\d+)?\s*$/
+const SPEC_AB_OR_ABC_REGEX = /^\s*[^*]+\s*\*\s*\d+(\.\d+)?(\s*\*\s*\d+(\.\d+)?)?\s*$/
 const FORMULA_ALLOWED_REGEX = /^[A-Za-z0-9_+\-*/().\s]+$/
 const A_NUMBER_REGEX = /[-+]?\d+(\.\d+)?/
 const SPEC_AB_REGEX = /^\s*[^*]+\s*\*\s*\d+(\.\d+)?\s*$/
@@ -82,6 +88,7 @@ export default function ProductsPage({ token, notify, t }: Props) {
   const [materials, setMaterials] = useState<MaterialMaster[]>([])
   const [fixedWeightTables, setFixedWeightTables] = useState<FixedWeightTable[]>([])
   const [productTypes, setProductTypes] = useState<ProductType[]>([])
+  const [itemTypeFormulaMap, setItemTypeFormulaMap] = useState<Record<string, string>>({})
   const [products, setProducts] = useState<Product[]>([])
   const [search, setSearch] = useState('')
   const [form, setForm] = useState(productInit)
@@ -143,12 +150,12 @@ export default function ProductsPage({ token, notify, t }: Props) {
     () => (productTypes.length > 0 ? productTypes.map((x) => (x.product_type_name || '').toUpperCase()).filter(Boolean) : DEFAULT_PRODUCT_TYPES),
     [productTypes],
   )
-  const productTypeFormulaByName = useMemo(() => {
-    const map = new Map<string, string>()
+  const productTypeIdByName = useMemo(() => {
+    const map = new Map<string, number>()
     productTypes.forEach((pt) => {
       const key = (pt.product_type_name || '').toUpperCase().trim()
       if (!key) return
-      map.set(key, (pt.formula || '').trim())
+      map.set(key, pt.id)
     })
     return map
   }, [productTypes])
@@ -164,18 +171,24 @@ export default function ProductsPage({ token, notify, t }: Props) {
   }
 
   const loadReferenceData = async () => {
-    const [cus, it, mats, fwt, ptypes] = await Promise.all([
+    const [cus, it, mats, fwt, ptypes, matrix] = await Promise.all([
       api<Customer[]>('/api/customers', 'GET', undefined, token),
       api<Item[]>('/api/items', 'GET', undefined, token),
       api<MaterialMaster[]>('/api/materials', 'GET', undefined, token),
       api<FixedWeightTable[]>('/api/fixed-weight-tables', 'GET', undefined, token),
       api<ProductType[]>('/api/product-types', 'GET', undefined, token),
+      api<FormulaMatrixPayload>('/api/item-type-formulas', 'GET', undefined, token),
     ])
+    const nextFormulaMap: Record<string, string> = {}
+    ;(matrix.formulas || []).forEach((row) => {
+      nextFormulaMap[`${row.item_id}:${row.product_type_id}`] = (row.formula || '').trim()
+    })
     setCustomers(cus)
     setItems(it)
     setMaterials(mats)
     setFixedWeightTables(fwt)
     setProductTypes(ptypes)
+    setItemTypeFormulaMap(nextFormulaMap)
   }
 
   const loadProductList = async () => {
@@ -442,7 +455,7 @@ export default function ProductsPage({ token, notify, t }: Props) {
         const fixedOptions = material ? (fixedByMaterialId.get(material.id) || []) : []
         const initialSpec = isRopeMaterial(material)
           ? (fixedOptions[0]?.size_label || '')
-          : (material?.spec || '').trim()
+          : ''
         const initialItemSize = computeItemSizeByItem(itemById.get(opt.value), initialSpec)
         const initialLami = material?.lami ? 'Yes' : 'No'
         const initialUw = computeUnitWeightByMaterial(material, initialSpec, initialLami)
@@ -473,7 +486,7 @@ export default function ProductsPage({ token, notify, t }: Props) {
       return String(hit.unit_weight_value)
     }
     if (!isFabricMaterial(material)) return '-'
-    const expr = (material.formula || '').trim()
+    const expr = (material.formula || '').trim().replace(/(?<=\d),(?=\d)/g, '.')
     if (!expr || !FORMULA_ALLOWED_REGEX.test(expr) || !SPEC_ABC_REGEX.test(specValue || '')) return '-'
     const parts = (specValue || '').split('*').map((p) => p.trim())
     if (parts.length !== 3) return '-'
@@ -499,8 +512,20 @@ export default function ProductsPage({ token, notify, t }: Props) {
     }
   }
 
-  const splitTopLevelStar = (expr: string) => {
+  const splitTopLevelPair = (expr: string) => {
     let depth = 0
+    for (let i = 0; i < expr.length; i += 1) {
+      const ch = expr[i]
+      if (ch === '(') depth += 1
+      else if (ch === ')') depth -= 1
+      else if ((ch === 'x' || ch === 'X' || ch === '×') && depth === 0) {
+        const left = expr.slice(0, i).trim()
+        const right = expr.slice(i + 1).trim()
+        if (!left || !right) return null
+        return { left, right }
+      }
+    }
+    depth = 0
     for (let i = 0; i < expr.length; i += 1) {
       const ch = expr[i]
       if (ch === '(') depth += 1
@@ -529,16 +554,24 @@ export default function ProductsPage({ token, notify, t }: Props) {
     const sourceValue = resolveItemSizeSourceValue(itemRow, fallbackSpec)
     const sourceField = (itemRow.item_size_source_field || 'spec_inner').toLowerCase()
     const selectedType = (selectedProduct?.type || '').toUpperCase().trim()
-    const formula = selectedType ? (productTypeFormulaByName.get(selectedType) || '') : ''
-    if (sourceField === 'liner' && !formula) {
-      return sourceValue || '-'
+    const selectedTypeId = selectedType ? productTypeIdByName.get(selectedType) : undefined
+    const formula = (selectedTypeId ? (itemTypeFormulaMap[`${itemRow.id}:${selectedTypeId}`] || '') : '').replace(/(?<=\d),(?=\d)/g, '.')
+    if (!formula) {
+      if (sourceField === 'liner') {
+        return sourceValue || '-'
+      }
+      return '-'
     }
     if (!formula || !FORMULA_ALLOWED_REGEX.test(formula)) return '-'
-    const pair = splitTopLevelStar(formula)
+    const pair = splitTopLevelPair(formula)
     if (!pair) return '-'
-    const sourceIsAB = ['top', 'bottom'].includes(sourceField)
-    if (sourceIsAB && !SPEC_AB_REGEX.test(sourceValue || '')) return '-'
-    if (!sourceIsAB && !SPEC_ABC_REGEX.test(sourceValue || '')) return '-'
+    if (sourceField === 'top' || sourceField === 'bottom') {
+      if (!SPEC_AB_REGEX.test(sourceValue || '')) return '-'
+    } else if (sourceField === 'liner') {
+      if (!SPEC_ABC_REGEX.test(sourceValue || '')) return '-'
+    } else {
+      if (!SPEC_AB_OR_ABC_REGEX.test(sourceValue || '')) return '-'
+    }
     const parts = (sourceValue || '').split('*').map((p) => p.trim())
     const aMatch = (parts[0] || '').match(A_NUMBER_REGEX)
     const a = aMatch ? Number(aMatch[0]) : Number.NaN
@@ -614,10 +647,19 @@ export default function ProductsPage({ token, notify, t }: Props) {
   }
 
   const onBulkRowSpecChange = (rowKey: number, value: string) => {
-    setBulkSpecRows((prev) =>
-      prev.map((row) => {
-        if (row.key !== rowKey) return row
+    setBulkSpecRows((prev) => {
+      const targetRow = prev.find((r) => r.key === rowKey)
+      const targetMaterial = targetRow ? materialForItem(targetRow.item_id) : null
+      const shouldSyncSameMaterial = !!targetMaterial && isFabricMaterial(targetMaterial)
+      return prev.map((row) => {
         const material = materialForItem(row.item_id)
+        const isAffected = row.key === rowKey || (
+          shouldSyncSameMaterial
+          && !!material
+          && material.id === targetMaterial!.id
+          && isFabricMaterial(material)
+        )
+        if (!isAffected) return row
         const nextSpec = value
         const nextItemSize = computeItemSizeByItem(itemById.get(row.item_id), nextSpec)
         const nextQty = computeQtyFromItemSize(nextItemSize)
@@ -630,8 +672,8 @@ export default function ProductsPage({ token, notify, t }: Props) {
           unit_weight_kg: nextUw,
           wt_kg: computeWtTextFromValues(nextQty, row.pcs_ea, nextUw),
         }
-      }),
-    )
+      })
+    })
   }
 
   const onBulkRowLamiChange = (rowKey: number, value: string) => {
@@ -689,7 +731,7 @@ export default function ProductsPage({ token, notify, t }: Props) {
         const needsInit = !row.item_size || row.item_size === '-'
         if (!needsInit) return row
         const mat = materialForItem(row.item_id)
-        const nextSpec = row.spec || (mat?.spec || '')
+        const nextSpec = row.spec || ''
         const nextItemSize = computeItemSizeByItem(itemById.get(row.item_id), nextSpec)
         const nextUw = computeUnitWeightByMaterial(mat, nextSpec, row.lami)
         return {
@@ -705,7 +747,7 @@ export default function ProductsPage({ token, notify, t }: Props) {
         }
       }),
     )
-  }, [showBulkSpecModal, bulkSpecRows.length, itemById, selectedProduct, materialById, fixedByMaterialId, productTypeFormulaByName])
+  }, [showBulkSpecModal, bulkSpecRows.length, itemById, selectedProduct, materialById, fixedByMaterialId, productTypeIdByName, itemTypeFormulaMap])
 
   const getSpecWt = (s: ProductSpec): number | null => {
     const direct = toFiniteNumber(s.wt_kg)
@@ -1138,8 +1180,11 @@ export default function ProductsPage({ token, notify, t }: Props) {
                             {showLamiForItem(s.item_id) ? (
                               <select
                                 value={specEdits[s.id]?.lami ?? (s.lami || 'No')}
-                                onChange={(e) => updateSpecEditField(s.id, 'lami', e.target.value)}
-                                onBlur={() => void saveSpecInline(s)}
+                                onChange={(e) => {
+                                  const next = e.target.value
+                                  updateSpecEditField(s.id, 'lami', next)
+                                  void saveSpecInline(s, { lami: next })
+                                }}
                               >
                                 <option value="Yes">Yes</option>
                                 <option value="No">No</option>

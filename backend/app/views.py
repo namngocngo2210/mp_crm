@@ -26,6 +26,7 @@ from .models import (
     Customer,
     Item,
     ItemProductType,
+    ItemTypeFormula,
     ProductType,
     ProcessingPrice,
     Quotation,
@@ -234,6 +235,22 @@ def _split_pair_formula(expr: str | None):
     text = _str_or_none(expr)
     if text is None:
         return None
+    # New format: left x right (x/X/× as separator at top level).
+    # Keep backward compatibility for legacy formulas that used "*".
+    depth = 0
+    for i, ch in enumerate(text):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth < 0:
+                return None
+        elif ch in {"x", "X", "×"} and depth == 0:
+            left = text[:i].strip()
+            right = text[i + 1 :].strip()
+            if not left or not right:
+                return None
+            return left, right
     depth = 0
     for i, ch in enumerate(text):
         if ch == "(":
@@ -275,6 +292,7 @@ def _validate_formula_expr(expr: str | None) -> str | None:
     text = _str_or_none(expr)
     if text is None:
         return None
+    text = re.sub(r"(?<=\d),(?=\d)", ".", text)
     if not FORMULA_ALLOWED_PATTERN.match(text):
         return None
     try:
@@ -435,7 +453,9 @@ def _compute_item_size(
     if not left_expr or not right_expr:
         return None
     vars_map: dict[str, float] | None = None
-    if source in {"spec_inner", "liner"}:
+    if source == "spec_inner":
+        vars_map = _parse_spec_parts(source_value, 3) or _parse_spec_parts(source_value, 2)
+    elif source == "liner":
         vars_map = _parse_spec_parts(source_value, 3)
     elif source in {"top", "bottom"}:
         vars_map = _parse_spec_parts(source_value, 2)
@@ -491,11 +511,26 @@ def _compute_item_size_by_product_type_formula(
             )
         )
         if pt is not None:
-            product_type_formula = _str_or_none(pt.formula)
+            row = session.scalar(
+                select(ItemTypeFormula).where(
+                    ItemTypeFormula.item_id == item.id,
+                    ItemTypeFormula.product_type_id == pt.id,
+                )
+            )
+            if row is not None:
+                product_type_formula = _str_or_none(row.formula)
     if not product_type_formula:
-        # Backward-compatible fallback for liner when formula is empty.
-        if source_field.lower() == "liner":
-            return _str_or_none(source_value)
+        if (source_field or "").strip().lower() == "liner":
+            return _compute_item_size(
+                "formula",
+                None,
+                None,
+                None,
+                None,
+                source_value,
+                source_field,
+            )
+        # Strict rule: without Product Type formula, item size is not computed.
         return None
     return _compute_item_size(
         "formula",
@@ -569,7 +604,7 @@ def _compute_unit_weight_from_item_material(session, item: Item | None, spec_val
     category_name = material.material_category.material_category_name if material.material_category else None
 
     if _is_fabric_category_name(category_name):
-        resolved_spec = _str_or_none(spec_value) or _str_or_none(material.spec)
+        resolved_spec = _str_or_none(spec_value)
         if not resolved_spec:
             return None, material, None
         normalized_lami = _normalize_lami_text(lami_value)
@@ -607,7 +642,7 @@ def _compute_unit_weight_from_item_material(session, item: Item | None, spec_val
             return None, material, chosen_spec
         return _to_float_or_none(fixed_row.unit_weight_value), material, fixed_row.size_label
 
-    resolved_spec = _str_or_none(material.spec) or _str_or_none(spec_value)
+    resolved_spec = _str_or_none(spec_value)
     return None, material, resolved_spec
 
 
@@ -857,7 +892,6 @@ def _ensure_product_types_table() -> None:
                 CREATE TABLE IF NOT EXISTS product_types (
                     id INTEGER NOT NULL PRIMARY KEY,
                     product_type_name VARCHAR(100) NOT NULL UNIQUE,
-                    formula TEXT,
                     deleted_at DATETIME,
                     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -865,10 +899,33 @@ def _ensure_product_types_table() -> None:
                 """
             )
         )
-        columns = conn.execute(text("PRAGMA table_info(product_types)")).fetchall()
-        has_formula = any((c[1] == "formula") for c in columns)
-        if not has_formula:
-            conn.execute(text("ALTER TABLE product_types ADD COLUMN formula TEXT"))
+        cols = [row[1] for row in conn.execute(text("PRAGMA table_info(product_types)")).fetchall()]
+        if "formula" in cols:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS product_types__new (
+                        id INTEGER NOT NULL PRIMARY KEY,
+                        product_type_name VARCHAR(100) NOT NULL UNIQUE,
+                        deleted_at DATETIME,
+                        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+            )
+            conn.execute(text("DELETE FROM product_types__new"))
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO product_types__new (id, product_type_name, deleted_at, created_at, updated_at)
+                    SELECT id, product_type_name, deleted_at, created_at, updated_at
+                    FROM product_types
+                    """
+                )
+            )
+            conn.execute(text("DROP TABLE product_types"))
+            conn.execute(text("ALTER TABLE product_types__new RENAME TO product_types"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_product_types_product_type_name ON product_types (product_type_name)"))
         for name in DEFAULT_PRODUCT_TYPES:
             existing = conn.execute(
@@ -1179,6 +1236,22 @@ def _ensure_items_table_schema() -> None:
         )
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_item_product_types_item_id ON item_product_types (item_id)"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_item_product_types_product_type_id ON item_product_types (product_type_id)"))
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS item_type_formulas (
+                    item_id INTEGER NOT NULL,
+                    product_type_id INTEGER NOT NULL,
+                    formula TEXT NOT NULL,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (item_id, product_type_id)
+                )
+                """
+            )
+        )
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_item_type_formulas_item_id ON item_type_formulas (item_id)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_item_type_formulas_product_type_id ON item_type_formulas (product_type_id)"))
 
 
 def _ensure_product_specs_schema() -> None:
@@ -1307,7 +1380,6 @@ def serialize_product_type(p: ProductType):
     return {
         "id": p.id,
         "product_type_name": p.product_type_name,
-        "formula": p.formula,
         "created_at": fmt_datetime(p.created_at),
         "updated_at": fmt_datetime(p.updated_at),
     }
@@ -1847,7 +1919,6 @@ def serialize_material(item: Material):
         "material_category_id": item.material_category_id,
         "material_category_name": item.material_category.material_category_name if item.material_category else None,
         "formula": item.formula,
-        "spec": item.spec,
         "lami": bool(item.lami),
         "created_at": fmt_datetime(item.created_at),
         "updated_at": fmt_datetime(item.updated_at),
@@ -2140,7 +2211,6 @@ def product_types(request: HttpRequest):
         if request.method == "POST":
             body = _body(request)
             name = _str_or_none(body.get("product_type_name"))
-            formula = _str_or_none(body.get("formula"))
             if not name:
                 return _ok({"detail": "Thiếu product_type_name"}, 400)
             normalized = name.upper()
@@ -2152,11 +2222,10 @@ def product_types(request: HttpRequest):
             if existing and existing.deleted_at is not None:
                 existing.deleted_at = None
                 existing.product_type_name = normalized
-                existing.formula = formula
                 session.add(existing)
                 session.flush()
                 return _ok(serialize_product_type(existing))
-            row = ProductType(product_type_name=normalized, formula=formula)
+            row = ProductType(product_type_name=normalized)
             session.add(row)
             session.flush()
             return _ok(serialize_product_type(row), 201)
@@ -2174,7 +2243,6 @@ def product_type_detail(request: HttpRequest, item_id: int):
         if request.method == "PUT":
             body = _body(request)
             name = _str_or_none(body.get("product_type_name"))
-            formula = _str_or_none(body.get("formula"))
             if not name:
                 return _ok({"detail": "Thiếu product_type_name"}, 400)
             normalized = name.upper()
@@ -2190,7 +2258,6 @@ def product_type_detail(request: HttpRequest, item_id: int):
             if dup:
                 return _ok({"detail": "Loại sản phẩm đã tồn tại"}, 400)
             row.product_type_name = normalized
-            row.formula = formula
             session.add(row)
             session.flush()
             return _ok(serialize_product_type(row))
@@ -2204,6 +2271,87 @@ def product_type_detail(request: HttpRequest, item_id: int):
             session.add(row)
             session.flush()
             return _ok({"success": True})
+    return _ok({"detail": "Method not allowed"}, 405)
+
+
+def serialize_item_type_formula(row: ItemTypeFormula):
+    return {
+        "item_id": row.item_id,
+        "product_type_id": row.product_type_id,
+        "formula": row.formula,
+        "created_at": fmt_datetime(row.created_at),
+        "updated_at": fmt_datetime(row.updated_at),
+    }
+
+
+@csrf_exempt
+@require_auth
+def item_type_formulas(request: HttpRequest):
+    _ensure_items_table_schema()
+    _ensure_product_types_table()
+    with get_session() as session:
+        if request.method == "GET":
+            items = session.scalars(select(Item).where(_active(Item)).order_by(Item.item_name.asc())).all()
+            product_types = session.scalars(
+                select(ProductType)
+                .where(_active(ProductType), ProductType.product_type_name != "OTHER")
+                .order_by(ProductType.id.asc())
+            ).all()
+            formulas = session.scalars(
+                select(ItemTypeFormula)
+                .join(Item, Item.id == ItemTypeFormula.item_id)
+                .join(ProductType, ProductType.id == ItemTypeFormula.product_type_id)
+                .where(_active(Item), _active(ProductType), ProductType.product_type_name != "OTHER")
+            ).all()
+            return _ok(
+                {
+                    "items": [{"id": x.id, "item_name": x.item_name} for x in items],
+                    "product_types": [serialize_product_type(x) for x in product_types],
+                    "formulas": [serialize_item_type_formula(x) for x in formulas],
+                }
+            )
+        if request.method == "PUT":
+            body = _body(request)
+            item_id = body.get("item_id")
+            product_type_id = body.get("product_type_id")
+            formula = _str_or_none(body.get("formula"))
+            if not item_id or not product_type_id:
+                return _ok({"detail": "Thiếu item_id hoặc product_type_id"}, 400)
+            item = session.scalar(select(Item).where(Item.id == int(item_id), _active(Item)))
+            if not item:
+                return _ok({"detail": "item_id không hợp lệ"}, 400)
+            pt = session.scalar(select(ProductType).where(ProductType.id == int(product_type_id), _active(ProductType)))
+            if not pt:
+                return _ok({"detail": "product_type_id không hợp lệ"}, 400)
+            existing = session.scalar(
+                select(ItemTypeFormula).where(
+                    ItemTypeFormula.item_id == item.id,
+                    ItemTypeFormula.product_type_id == pt.id,
+                )
+            )
+            if not formula:
+                if existing:
+                    session.delete(existing)
+                    session.flush()
+                return _ok({"success": True})
+            pair = _split_pair_formula(formula)
+            if not pair:
+                return _ok({"detail": "Công thức không hợp lệ. Định dạng đúng: left x right"}, 400)
+            left_expr, right_expr = pair
+            left_valid = _validate_formula_expr(left_expr)
+            right_valid = _validate_formula_expr(right_expr)
+            if not left_valid or not right_valid:
+                return _ok({"detail": "Công thức không hợp lệ. Chỉ dùng A/B/C, số và + - * / ( )"}, 400)
+            validated = f"{left_valid} x {right_valid}"
+            if existing:
+                existing.formula = validated
+                session.add(existing)
+                session.flush()
+                return _ok(serialize_item_type_formula(existing))
+            row = ItemTypeFormula(item_id=item.id, product_type_id=pt.id, formula=validated)
+            session.add(row)
+            session.flush()
+            return _ok(serialize_item_type_formula(row), 201)
     return _ok({"detail": "Method not allowed"}, 405)
 
 
@@ -2723,7 +2871,6 @@ def materials(request: HttpRequest):
                     for r in rows
                     if search in (r.material_name or "").lower()
                     or search in (r.formula or "").lower()
-                    or search in (r.spec or "").lower()
                     or search in ((r.material_category.material_category_name if r.material_category else "") or "").lower()
                 ]
             return _ok([serialize_material(r) for r in rows])
@@ -2732,7 +2879,6 @@ def materials(request: HttpRequest):
             name = _str_or_none(body.get("material_name"))
             material_category_id = body.get("material_category_id")
             formula = _str_or_none(body.get("formula"))
-            spec = _str_or_none(body.get("spec"))
             lami = bool(body.get("lami"))
             if not name:
                 return _ok({"detail": "Thiếu material_name"}, 400)
@@ -2745,7 +2891,6 @@ def materials(request: HttpRequest):
                 return _ok({"detail": "material_category_id không hợp lệ"}, 400)
             if not _is_fabric_category_name(category.material_category_name):
                 formula = None
-                spec = None
             existing = session.scalar(select(Material).where(Material.material_name == name))
             if existing and existing.deleted_at is None:
                 return _ok({"detail": "Material đã tồn tại"}, 400)
@@ -2753,12 +2898,11 @@ def materials(request: HttpRequest):
                 existing.deleted_at = None
                 existing.material_category_id = category.id
                 existing.formula = formula
-                existing.spec = spec
                 existing.lami = lami
                 session.add(existing)
                 session.flush()
                 return _ok(serialize_material(existing))
-            row = Material(material_name=name, material_category_id=category.id, formula=formula, spec=spec, lami=lami)
+            row = Material(material_name=name, material_category_id=category.id, formula=formula, lami=lami)
             session.add(row)
             session.flush()
             return _ok(serialize_material(row), 201)
@@ -2822,7 +2966,6 @@ def material_detail(request: HttpRequest, item_id: int):
             name = _str_or_none(body.get("material_name"))
             material_category_id = body.get("material_category_id")
             formula = _str_or_none(body.get("formula"))
-            spec = _str_or_none(body.get("spec"))
             lami = bool(body.get("lami"))
             if not name:
                 return _ok({"detail": "Thiếu material_name"}, 400)
@@ -2835,7 +2978,6 @@ def material_detail(request: HttpRequest, item_id: int):
                 return _ok({"detail": "material_category_id không hợp lệ"}, 400)
             if not _is_fabric_category_name(category.material_category_name):
                 formula = None
-                spec = None
             dup = session.scalar(
                 select(Material).where(
                     Material.material_name == name,
@@ -2848,7 +2990,6 @@ def material_detail(request: HttpRequest, item_id: int):
             row.material_name = name
             row.material_category_id = category.id
             row.formula = formula
-            row.spec = spec
             row.lami = lami
             session.add(row)
             session.flush()
@@ -4298,10 +4439,13 @@ def product_specs(request: HttpRequest, product_id: int):
                 raw_item_color = None
 
             input_lami = _normalize_lami_text(body.get("lami"))
+            requested_spec = _str_or_none(body.get("spec"))
+            if not requested_spec:
+                requested_spec = _resolve_item_size_source_value(item.item_size_source_field, product, None)
             computed_unit_weight, item_material, resolved_spec = _compute_unit_weight_from_item_material(
                 session,
                 item,
-                _str_or_none(body.get("spec")),
+                requested_spec,
                 input_lami,
             )
             if item_material is None:

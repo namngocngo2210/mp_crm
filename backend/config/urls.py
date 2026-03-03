@@ -15,6 +15,7 @@ urlpatterns = [
     path("api/users/<int:user_id>", views.user_detail),
     path("api/product-types", views.product_types),
     path("api/product-types/<int:item_id>", views.product_type_detail),
+    path("api/item-type-formulas", views.item_type_formulas),
     path("api/customers", views.customers),
     path("api/customers/import-excel", views.customers_import_excel),
     path("api/customers/<int:item_id>", views.customer_detail),

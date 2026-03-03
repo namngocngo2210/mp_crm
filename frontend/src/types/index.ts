@@ -39,7 +39,14 @@ export type Product = {
 export type ProductType = {
   id: number
   product_type_name: string
-  formula?: string
+  created_at?: string
+  updated_at?: string
+}
+
+export type ItemTypeFormula = {
+  item_id: number
+  product_type_id: number
+  formula: string
   created_at?: string
   updated_at?: string
 }
@@ -143,7 +150,6 @@ export type MaterialMaster = {
   material_category_id?: number
   material_category_name?: string
   formula?: string
-  spec?: string
   lami?: boolean
   created_at?: string
   updated_at?: string

@@ -96,7 +96,6 @@ class ProductType(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     product_type_name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
-    formula: Mapped[str | None] = mapped_column(Text)
     deleted_at: Mapped[str | None] = mapped_column(DateTime)
     created_at: Mapped[str] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[str] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
@@ -122,6 +121,16 @@ class ItemProductType(Base):
     item_id: Mapped[int] = mapped_column(ForeignKey("items.id", ondelete="CASCADE"), primary_key=True)
     product_type_id: Mapped[int] = mapped_column(ForeignKey("product_types.id", ondelete="CASCADE"), primary_key=True)
     created_at: Mapped[str] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+
+class ItemTypeFormula(Base):
+    __tablename__ = "item_type_formulas"
+
+    item_id: Mapped[int] = mapped_column(ForeignKey("items.id", ondelete="CASCADE"), primary_key=True)
+    product_type_id: Mapped[int] = mapped_column(ForeignKey("product_types.id", ondelete="CASCADE"), primary_key=True)
+    formula: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[str] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
 
 class RawMaterialPrice(Base):

@@ -1189,6 +1189,43 @@ tr:hover td {
   margin-top: 10px;
 }
 
+.formula-matrix-wrap {
+  overflow-x: auto;
+}
+
+.formula-matrix-table {
+  table-layout: fixed;
+  width: 100%;
+}
+
+.formula-matrix-table th,
+.formula-matrix-table td {
+  padding: 6px 6px;
+  font-size: 12px;
+  white-space: normal;
+  vertical-align: middle;
+}
+
+.formula-matrix-item-col {
+  width: 160px;
+  min-width: 160px;
+}
+
+.formula-matrix-head {
+  width: 116px;
+  min-width: 116px;
+  line-height: 1.2;
+  word-break: break-word;
+}
+
+.formula-cell-input {
+  width: 100%;
+  min-width: 0;
+  min-height: 30px;
+  padding: 4px 6px;
+  font-size: 12px;
+}
+
 .product-detail-info {
   border: 1px solid var(--line);
   background: #f8fafc;
