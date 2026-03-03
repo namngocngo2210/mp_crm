@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react'
 import { Pencil, Plus, Trash2 } from 'lucide-react'
+import Select from 'react-select'
 import { api } from '../lib/api'
 import { I18nKey } from '../lib/i18n'
 import { ItemTypeFormula, ProductType } from '../types'
@@ -9,9 +10,11 @@ import ConfirmModal from '../components/ConfirmModal'
 type Props = { token: string; notify: (message: string, type: 'success' | 'error') => void; t: (key: I18nKey) => string }
 type FormulaMatrixPayload = {
   items: Array<{ id: number; item_name: string }>
+  available_items?: Array<{ id: number; item_name: string }>
   product_types: ProductType[]
   formulas: ItemTypeFormula[]
 }
+type Option = { value: number; label: string }
 
 export default function ProductTypesPage({ token, notify, t }: Props) {
   const [tab, setTab] = useState<'config' | 'formula'>('config')
@@ -23,9 +26,13 @@ export default function ProductTypesPage({ token, notify, t }: Props) {
   const [pendingDelete, setPendingDelete] = useState<ProductType | null>(null)
 
   const [formulaItems, setFormulaItems] = useState<Array<{ id: number; item_name: string }>>([])
+  const [availableFormulaItems, setAvailableFormulaItems] = useState<Array<{ id: number; item_name: string }>>([])
   const [formulaTypes, setFormulaTypes] = useState<ProductType[]>([])
   const [formulaMap, setFormulaMap] = useState<Record<string, string>>({})
   const [savingCellKey, setSavingCellKey] = useState('')
+  const [showAddItemsModal, setShowAddItemsModal] = useState(false)
+  const [addItemValues, setAddItemValues] = useState<Option[]>([])
+  const [deletingItemId, setDeletingItemId] = useState<number | null>(null)
 
   const matrixKey = (itemId: number, typeId: number) => `${itemId}:${typeId}`
 
@@ -45,6 +52,7 @@ export default function ProductTypesPage({ token, notify, t }: Props) {
     try {
       const data = await api<FormulaMatrixPayload>('/api/item-type-formulas', 'GET', undefined, token)
       setFormulaItems(data.items || [])
+      setAvailableFormulaItems(data.available_items || [])
       setFormulaTypes(data.product_types || [])
       const nextMap: Record<string, string> = {}
       ;(data.formulas || []).forEach((f) => {
@@ -127,6 +135,36 @@ export default function ProductTypesPage({ token, notify, t }: Props) {
     }
   }
 
+  const addItemOptions: Option[] = availableFormulaItems.map((it) => ({ value: it.id, label: it.item_name }))
+
+  const saveAddedItems = async () => {
+    const ids = addItemValues.map((x) => x.value)
+    if (ids.length === 0) {
+      setShowAddItemsModal(false)
+      return
+    }
+    try {
+      await api('/api/item-type-formulas', 'POST', { item_ids: ids }, token)
+      setShowAddItemsModal(false)
+      setAddItemValues([])
+      await loadFormulaMatrix()
+      notify('Thêm item vào bảng công thức thành công', 'success')
+    } catch (err) {
+      notify((err as Error).message, 'error')
+    }
+  }
+
+  const deleteFormulaItem = async (itemId: number) => {
+    try {
+      await api('/api/item-type-formulas', 'DELETE', { item_id: itemId }, token)
+      setDeletingItemId(null)
+      await loadFormulaMatrix()
+      notify('Đã xóa item khỏi bảng công thức', 'success')
+    } catch (err) {
+      notify((err as Error).message, 'error')
+    }
+  }
+
   return (
     <div className="page-content">
       <div className="row toolbar-row">
@@ -206,7 +244,20 @@ export default function ProductTypesPage({ token, notify, t }: Props) {
           </div>
         </>
       ) : (
-        <div className="table-wrap formula-matrix-wrap">
+        <>
+          <div className="row toolbar-row">
+            <button
+              className="primary-light toolbar-add-btn"
+              type="button"
+              onClick={() => {
+                setAddItemValues([])
+                setShowAddItemsModal(true)
+              }}
+            >
+              <Plus size={15} /> Thêm item
+            </button>
+          </div>
+          <div className="table-wrap formula-matrix-wrap">
           <table className="formula-matrix-table">
             <thead>
               <tr>
@@ -214,6 +265,7 @@ export default function ProductTypesPage({ token, notify, t }: Props) {
                 {formulaTypes.map((pt) => (
                   <th key={pt.id} className="formula-matrix-head">{pt.product_type_name}</th>
                 ))}
+                <th style={{ width: 84, minWidth: 84 }}>{t('actions')}</th>
               </tr>
             </thead>
             <tbody>
@@ -235,13 +287,25 @@ export default function ProductTypesPage({ token, notify, t }: Props) {
                       </td>
                     )
                   })}
+                  <td>
+                    <button
+                      type="button"
+                      className="danger-light icon-btn"
+                      title={t('delete')}
+                      aria-label={t('delete')}
+                      onClick={() => setDeletingItemId(it.id)}
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </td>
                 </tr>
               )) : (
-                <tr><td className="empty-cell" colSpan={Math.max(2, formulaTypes.length + 1)}>{t('noData')}</td></tr>
+                <tr><td className="empty-cell" colSpan={Math.max(3, formulaTypes.length + 2)}>{t('noData')}</td></tr>
               )}
             </tbody>
           </table>
         </div>
+        </>
       )}
 
       <FormModal open={showForm} title={editing ? t('edit') : t('addProductType')} onClose={() => setShowForm(false)}>
@@ -265,6 +329,42 @@ export default function ProductTypesPage({ token, notify, t }: Props) {
         cancelLabel={t('cancel')}
         onConfirm={() => void deleteOne()}
         onCancel={() => setPendingDelete(null)}
+      />
+
+      <FormModal
+        open={showAddItemsModal}
+        title="Thêm item công thức"
+        onClose={() => setShowAddItemsModal(false)}
+        modalClassName="formula-item-picker-modal"
+      >
+        <div className="form-field">
+          <label>Chọn item</label>
+          <Select
+            isMulti
+            classNamePrefix="select2"
+            options={addItemOptions}
+            value={addItemValues}
+            onChange={(v: unknown) => setAddItemValues(Array.isArray(v) ? (v as Option[]) : [])}
+            placeholder="Chọn item"
+            noOptionsMessage={() => 'Không còn item để thêm'}
+          />
+        </div>
+        <div className="row form-actions">
+          <button className="primary" type="button" onClick={() => void saveAddedItems()}>{t('save')}</button>
+          <button type="button" onClick={() => setShowAddItemsModal(false)}>{t('cancel')}</button>
+        </div>
+      </FormModal>
+
+      <ConfirmModal
+        open={deletingItemId != null}
+        title={t('confirmTitle')}
+        message="Bạn có chắc muốn xóa item này khỏi bảng công thức?"
+        confirmLabel={t('delete')}
+        cancelLabel={t('cancel')}
+        onConfirm={() => {
+          if (deletingItemId != null) void deleteFormulaItem(deletingItemId)
+        }}
+        onCancel={() => setDeletingItemId(null)}
       />
     </div>
   )

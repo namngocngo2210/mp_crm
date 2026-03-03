@@ -133,6 +133,13 @@ class ItemTypeFormula(Base):
     updated_at: Mapped[str] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
 
+class ItemTypeFormulaItem(Base):
+    __tablename__ = "item_type_formula_items"
+
+    item_id: Mapped[int] = mapped_column(ForeignKey("items.id", ondelete="CASCADE"), primary_key=True)
+    created_at: Mapped[str] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+
 class RawMaterialPrice(Base):
     __tablename__ = "raw_material_prices"
 
@@ -162,6 +169,7 @@ class MaterialCategory(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     material_category_name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    material_category_code: Mapped[str | None] = mapped_column(String(50), index=True)
     spec_format: Mapped[str] = mapped_column(String(20), nullable=False, default="text")
     format_value: Mapped[str | None] = mapped_column("format", String(255))
     deleted_at: Mapped[str | None] = mapped_column(DateTime)

@@ -1172,6 +1172,20 @@ tr:hover td {
   overflow-y: auto;
 }
 
+.formula-item-picker-modal {
+  width: min(1220px, 94vw);
+  height: calc(100vh - 120px);
+  display: flex;
+  flex-direction: column;
+}
+
+.formula-item-picker-modal .form-modal-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  overflow-y: auto;
+}
+
 .quotation-extra-row {
   display: grid;
   grid-template-columns: 1.1fr 1.1fr 0.9fr auto;

@@ -27,6 +27,7 @@ from .models import (
     Item,
     ItemProductType,
     ItemTypeFormula,
+    ItemTypeFormulaItem,
     ProductType,
     ProcessingPrice,
     Quotation,
@@ -120,13 +121,38 @@ def _normalize_customer_level(v):
     return level if level in CUSTOMER_LEVEL_FACTORS else None
 
 
-def _is_fabric_category_name(name: str | None) -> bool:
+def _infer_material_category_code_from_name(name: str | None) -> str:
     lowered = _norm_text(name)
+    if any(x in lowered for x in {"dây", "day", "rope"}):
+        return "ROPE"
+    if any(x in lowered for x in {"vải", "vai", "fabric", "tarpaulin"}):
+        return "FABRIC"
+    return "OTHER"
+
+
+def _normalize_material_category_code(code: str | None, name_for_fallback: str | None = None) -> str:
+    raw = _str_or_none(code)
+    if raw is None:
+        return _infer_material_category_code_from_name(name_for_fallback)
+    normalized = re.sub(r"[^A-Za-z0-9_]+", "_", raw).strip("_").upper()
+    if not normalized:
+        return _infer_material_category_code_from_name(name_for_fallback)
+    return normalized
+
+
+def _is_fabric_category(category_code: str | None, category_name: str | None) -> bool:
+    code = _upper_or_none(category_code)
+    if code in {"FABRIC", "VAI"}:
+        return True
+    lowered = _norm_text(category_name)
     return "vải" in lowered or "vai" in lowered
 
 
-def _is_rope_category_name(name: str | None) -> bool:
-    lowered = _norm_text(name)
+def _is_rope_category(category_code: str | None, category_name: str | None) -> bool:
+    code = _upper_or_none(category_code)
+    if code in {"ROPE", "DAY", "DAY_NHUA"}:
+        return True
+    lowered = _norm_text(category_name)
     return "dây" in lowered or "day" in lowered
 
 
@@ -602,8 +628,9 @@ def _compute_unit_weight_from_item_material(session, item: Item | None, spec_val
     if material is None:
         return None, None, None
     category_name = material.material_category.material_category_name if material.material_category else None
+    category_code = material.material_category.material_category_code if material.material_category else None
 
-    if _is_fabric_category_name(category_name):
+    if _is_fabric_category(category_code, category_name):
         resolved_spec = _str_or_none(spec_value)
         if not resolved_spec:
             return None, material, None
@@ -621,7 +648,7 @@ def _compute_unit_weight_from_item_material(session, item: Item | None, spec_val
         )
         return computed, material, resolved_spec
 
-    if _is_rope_category_name(category_name):
+    if _is_rope_category(category_code, category_name):
         chosen_spec = _str_or_none(spec_value)
         fixed_row = None
         if chosen_spec:
@@ -664,12 +691,13 @@ def _sync_product_spec_from_item_material(session, spec_row: ProductSpec):
     if material is None:
         return
     category_name = material.material_category.material_category_name if material.material_category else None
-    if _is_fabric_category_name(category_name):
+    category_code = material.material_category.material_category_code if material.material_category else None
+    if _is_fabric_category(category_code, category_name):
         if not _str_or_none(spec_row.spec) and resolved_spec:
             spec_row.spec = resolved_spec
         if _normalize_lami_text(spec_row.lami) is None:
             spec_row.lami = "Yes" if bool(material.lami) else "No"
-    elif _is_rope_category_name(category_name):
+    elif _is_rope_category(category_code, category_name):
         if resolved_spec:
             spec_row.spec = resolved_spec
         spec_row.lami = "No"
@@ -1091,6 +1119,7 @@ def _ensure_material_master_tables() -> None:
                 CREATE TABLE IF NOT EXISTS material_categories (
                     id INTEGER NOT NULL PRIMARY KEY,
                     material_category_name VARCHAR(100) NOT NULL UNIQUE,
+                    material_category_code VARCHAR(50),
                     spec_format VARCHAR(20) NOT NULL DEFAULT 'text',
                     format VARCHAR(255),
                     deleted_at DATETIME,
@@ -1130,12 +1159,31 @@ def _ensure_material_master_tables() -> None:
             conn.execute(text("ALTER TABLE materials ADD COLUMN lami BOOLEAN NOT NULL DEFAULT 0"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_materials_material_category_id ON materials (material_category_id)"))
         mc_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(material_categories)")).fetchall()}
+        if "material_category_code" not in mc_cols:
+            conn.execute(text("ALTER TABLE material_categories ADD COLUMN material_category_code VARCHAR(50)"))
         if "spec_format" not in mc_cols:
             conn.execute(text("ALTER TABLE material_categories ADD COLUMN spec_format VARCHAR(20) NOT NULL DEFAULT 'text'"))
         if "format" not in mc_cols:
             conn.execute(text('ALTER TABLE material_categories ADD COLUMN "format" VARCHAR(255)'))
         if "formula" in mc_cols:
             conn.execute(text('UPDATE material_categories SET "format" = formula WHERE ("format" IS NULL OR TRIM("format") = "") AND formula IS NOT NULL'))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_material_categories_code ON material_categories (material_category_code)"))
+        rows = conn.execute(text("SELECT id, material_category_name, material_category_code FROM material_categories")).fetchall()
+        for row_id, row_name, row_code in rows:
+            if _str_or_none(row_code):
+                continue
+            inferred = _normalize_material_category_code(None, row_name)
+            conn.execute(
+                text(
+                    """
+                    UPDATE material_categories
+                    SET material_category_code = :code,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = :id
+                    """
+                ),
+                {"id": row_id, "code": inferred},
+            )
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_processing_prices_process_name ON processing_prices (process_name)"))
         conn.execute(
             text(
@@ -1250,8 +1298,27 @@ def _ensure_items_table_schema() -> None:
                 """
             )
         )
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS item_type_formula_items (
+                    item_id INTEGER NOT NULL PRIMARY KEY,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        # Keep formula matrix empty by default.
+        # Backward compatibility cleanup: only reset when table looks exactly like
+        # legacy auto-seed (all active items copied and no formulas yet).
+        seeded = int(conn.execute(text("SELECT COUNT(1) FROM item_type_formula_items")).scalar() or 0)
+        formula_count = int(conn.execute(text("SELECT COUNT(1) FROM item_type_formulas")).scalar() or 0)
+        active_items = int(conn.execute(text("SELECT COUNT(1) FROM items WHERE deleted_at IS NULL")).scalar() or 0)
+        if seeded > 0 and formula_count == 0 and seeded == active_items:
+            conn.execute(text("DELETE FROM item_type_formula_items"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_item_type_formulas_item_id ON item_type_formulas (item_id)"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_item_type_formulas_product_type_id ON item_type_formulas (product_type_id)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_item_type_formula_items_item_id ON item_type_formula_items (item_id)"))
 
 
 def _ensure_product_specs_schema() -> None:
@@ -1905,6 +1972,7 @@ def serialize_material_category(item: MaterialCategory):
     return {
         "id": item.id,
         "material_category_name": item.material_category_name,
+        "material_category_code": item.material_category_code,
         "spec_format": item.spec_format,
         "format": item.format_value,
         "created_at": fmt_datetime(item.created_at),
@@ -1918,6 +1986,7 @@ def serialize_material(item: Material):
         "material_name": item.material_name,
         "material_category_id": item.material_category_id,
         "material_category_name": item.material_category.material_category_name if item.material_category else None,
+        "material_category_code": item.material_category.material_category_code if item.material_category else None,
         "formula": item.formula,
         "lami": bool(item.lami),
         "created_at": fmt_datetime(item.created_at),
@@ -2291,7 +2360,11 @@ def item_type_formulas(request: HttpRequest):
     _ensure_product_types_table()
     with get_session() as session:
         if request.method == "GET":
-            items = session.scalars(select(Item).where(_active(Item)).order_by(Item.item_name.asc())).all()
+            configured_ids = session.scalars(select(ItemTypeFormulaItem.item_id)).all()
+            configured_id_set = {int(x) for x in configured_ids}
+            all_items = session.scalars(select(Item).where(_active(Item)).order_by(Item.item_name.asc())).all()
+            items = [x for x in all_items if x.id in configured_id_set]
+            available_items = [x for x in all_items if x.id not in configured_id_set]
             product_types = session.scalars(
                 select(ProductType)
                 .where(_active(ProductType), ProductType.product_type_name != "OTHER")
@@ -2301,15 +2374,44 @@ def item_type_formulas(request: HttpRequest):
                 select(ItemTypeFormula)
                 .join(Item, Item.id == ItemTypeFormula.item_id)
                 .join(ProductType, ProductType.id == ItemTypeFormula.product_type_id)
-                .where(_active(Item), _active(ProductType), ProductType.product_type_name != "OTHER")
+                .where(
+                    _active(Item),
+                    _active(ProductType),
+                    ProductType.product_type_name != "OTHER",
+                    ItemTypeFormula.item_id.in_(configured_id_set if configured_id_set else {0}),
+                )
             ).all()
             return _ok(
                 {
                     "items": [{"id": x.id, "item_name": x.item_name} for x in items],
+                    "available_items": [{"id": x.id, "item_name": x.item_name} for x in available_items],
                     "product_types": [serialize_product_type(x) for x in product_types],
                     "formulas": [serialize_item_type_formula(x) for x in formulas],
                 }
             )
+        if request.method == "POST":
+            body = _body(request)
+            raw_ids = body.get("item_ids")
+            if not isinstance(raw_ids, list) or len(raw_ids) == 0:
+                return _ok({"detail": "Thiếu item_ids"}, 400)
+            created = 0
+            for raw_id in raw_ids:
+                try:
+                    item_id = int(raw_id)
+                except (TypeError, ValueError):
+                    continue
+                item = session.scalar(select(Item).where(Item.id == item_id, _active(Item)))
+                if not item:
+                    continue
+                exists = session.scalar(
+                    select(ItemTypeFormulaItem).where(ItemTypeFormulaItem.item_id == item_id)
+                )
+                if exists:
+                    continue
+                session.add(ItemTypeFormulaItem(item_id=item_id))
+                created += 1
+            session.flush()
+            return _ok({"success": True, "created": created})
         if request.method == "PUT":
             body = _body(request)
             item_id = body.get("item_id")
@@ -2352,6 +2454,23 @@ def item_type_formulas(request: HttpRequest):
             session.add(row)
             session.flush()
             return _ok(serialize_item_type_formula(row), 201)
+        if request.method == "DELETE":
+            body = _body(request)
+            item_id = body.get("item_id")
+            if not item_id:
+                return _ok({"detail": "Thiếu item_id"}, 400)
+            try:
+                target_item_id = int(item_id)
+            except (TypeError, ValueError):
+                return _ok({"detail": "item_id không hợp lệ"}, 400)
+            config = session.scalar(select(ItemTypeFormulaItem).where(ItemTypeFormulaItem.item_id == target_item_id))
+            if config:
+                session.delete(config)
+            formula_rows = session.scalars(select(ItemTypeFormula).where(ItemTypeFormula.item_id == target_item_id)).all()
+            for row in formula_rows:
+                session.delete(row)
+            session.flush()
+            return _ok({"success": True})
     return _ok({"detail": "Method not allowed"}, 405)
 
 
@@ -2823,6 +2942,7 @@ def material_categories(request: HttpRequest):
                     r
                     for r in rows
                     if search in (r.material_category_name or "").lower()
+                    or search in (r.material_category_code or "").lower()
                     or search in (r.spec_format or "").lower()
                     or search in (r.format_value or "").lower()
                 ]
@@ -2830,6 +2950,7 @@ def material_categories(request: HttpRequest):
         if request.method == "POST":
             body = _body(request)
             name = _str_or_none(body.get("material_category_name"))
+            category_code = _normalize_material_category_code(_str_or_none(body.get("material_category_code")), name)
             spec_format = (_str_or_none(body.get("spec_format")) or "text").lower()
             format_value = _str_or_none(body.get("format"))
             if not name:
@@ -2847,10 +2968,16 @@ def material_categories(request: HttpRequest):
                 existing.deleted_at = None
                 existing.spec_format = spec_format
                 existing.format_value = format_value
+                existing.material_category_code = category_code
                 session.add(existing)
                 session.flush()
                 return _ok(serialize_material_category(existing))
-            row = MaterialCategory(material_category_name=name, spec_format=spec_format, format_value=format_value)
+            row = MaterialCategory(
+                material_category_name=name,
+                material_category_code=category_code,
+                spec_format=spec_format,
+                format_value=format_value,
+            )
             session.add(row)
             session.flush()
             return _ok(serialize_material_category(row), 201)
@@ -2889,7 +3016,7 @@ def materials(request: HttpRequest):
             )
             if not category:
                 return _ok({"detail": "material_category_id không hợp lệ"}, 400)
-            if not _is_fabric_category_name(category.material_category_name):
+            if not _is_fabric_category(category.material_category_code, category.material_category_name):
                 formula = None
             existing = session.scalar(select(Material).where(Material.material_name == name))
             if existing and existing.deleted_at is None:
@@ -2920,6 +3047,7 @@ def material_category_detail(request: HttpRequest, item_id: int):
         if request.method == "PUT":
             body = _body(request)
             name = _str_or_none(body.get("material_category_name"))
+            category_code = _normalize_material_category_code(_str_or_none(body.get("material_category_code")), name)
             spec_format = (_str_or_none(body.get("spec_format")) or "text").lower()
             format_value = _str_or_none(body.get("format"))
             if not name:
@@ -2940,6 +3068,7 @@ def material_category_detail(request: HttpRequest, item_id: int):
             if dup:
                 return _ok({"detail": "Material category đã tồn tại"}, 400)
             row.material_category_name = name
+            row.material_category_code = category_code
             row.spec_format = spec_format
             row.format_value = format_value
             session.add(row)
@@ -2976,7 +3105,7 @@ def material_detail(request: HttpRequest, item_id: int):
             )
             if not category:
                 return _ok({"detail": "material_category_id không hợp lệ"}, 400)
-            if not _is_fabric_category_name(category.material_category_name):
+            if not _is_fabric_category(category.material_category_code, category.material_category_name):
                 formula = None
             dup = session.scalar(
                 select(Material).where(
@@ -4453,9 +4582,10 @@ def product_specs(request: HttpRequest, product_id: int):
             if not resolved_spec:
                 return _ok({"detail": "Thiếu spec hợp lệ cho material của item"}, 400)
             category_name = item_material.material_category.material_category_name if item_material.material_category else None
-            if _is_fabric_category_name(category_name):
+            category_code = item_material.material_category.material_category_code if item_material.material_category else None
+            if _is_fabric_category(category_code, category_name):
                 resolved_lami = input_lami or ("Yes" if bool(item_material.lami) else "No")
-            elif _is_rope_category_name(category_name):
+            elif _is_rope_category(category_code, category_name):
                 resolved_lami = "No"
             else:
                 resolved_lami = input_lami or "No"
@@ -4560,10 +4690,11 @@ def product_spec_detail(request: HttpRequest, spec_id: int):
             if not resolved_spec:
                 return _ok({"detail": "Thiếu spec hợp lệ cho material của item"}, 400)
             category_name = item_material.material_category.material_category_name if item_material.material_category else None
-            if _is_fabric_category_name(category_name):
+            category_code = item_material.material_category.material_category_code if item_material.material_category else None
+            if _is_fabric_category(category_code, category_name):
                 item.spec = resolved_spec
                 item.lami = normalized_lami or ("Yes" if bool(item_material.lami) else "No")
-            elif _is_rope_category_name(category_name):
+            elif _is_rope_category(category_code, category_name):
                 item.spec = resolved_spec
                 item.lami = "No"
             else:

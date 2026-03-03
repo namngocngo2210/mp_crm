@@ -14,6 +14,7 @@ export default function MaterialCategoriesPage({ token, notify, t }: Props) {
   const [showForm, setShowForm] = useState(false)
   const [editing, setEditing] = useState<MaterialCategory | null>(null)
   const [name, setName] = useState('')
+  const [code, setCode] = useState('')
   const [specFormat, setSpecFormat] = useState<'size' | 'text'>('text')
   const [formatValue, setFormatValue] = useState('')
   const [pendingDelete, setPendingDelete] = useState<MaterialCategory | null>(null)
@@ -45,6 +46,7 @@ export default function MaterialCategoriesPage({ token, notify, t }: Props) {
       if (editing) {
         await api(`/api/material-categories/${editing.id}`, 'PUT', {
           material_category_name: name.trim(),
+          material_category_code: code.trim() || null,
           spec_format: specFormat,
           format: specFormat === 'size' ? formatValue.trim() : null,
         }, token)
@@ -52,6 +54,7 @@ export default function MaterialCategoriesPage({ token, notify, t }: Props) {
       } else {
         await api('/api/material-categories', 'POST', {
           material_category_name: name.trim(),
+          material_category_code: code.trim() || null,
           spec_format: specFormat,
           format: specFormat === 'size' ? formatValue.trim() : null,
         }, token)
@@ -60,6 +63,7 @@ export default function MaterialCategoriesPage({ token, notify, t }: Props) {
       setShowForm(false)
       setEditing(null)
       setName('')
+      setCode('')
       setSpecFormat('text')
       setFormatValue('')
       await load()
@@ -90,6 +94,7 @@ export default function MaterialCategoriesPage({ token, notify, t }: Props) {
           onClick={() => {
             setEditing(null)
             setName('')
+            setCode('')
             setSpecFormat('text')
             setFormatValue('')
             setShowForm(true)
@@ -104,6 +109,7 @@ export default function MaterialCategoriesPage({ token, notify, t }: Props) {
             <tr>
               <th>ID</th>
               <th>Material Category</th>
+              <th>Code</th>
               <th>Spec Format</th>
               <th>Format</th>
               <th>{t('colCreatedAt')}</th>
@@ -116,6 +122,7 @@ export default function MaterialCategoriesPage({ token, notify, t }: Props) {
               <tr key={r.id}>
                 <td>{r.id}</td>
                 <td>{r.material_category_name}</td>
+                <td>{r.material_category_code || '-'}</td>
                 <td>{specFormatLabel(r.spec_format)}</td>
                 <td>{r.format || '-'}</td>
                 <td>{r.created_at || '-'}</td>
@@ -125,6 +132,7 @@ export default function MaterialCategoriesPage({ token, notify, t }: Props) {
                     <button type="button" className="icon-btn" title={t('edit')} aria-label={t('edit')} onClick={() => {
                       setEditing(r)
                       setName(r.material_category_name)
+                      setCode(r.material_category_code || '')
                       setSpecFormat((r.spec_format || 'text') as 'size' | 'text')
                       setFormatValue(r.format || '')
                       setShowForm(true)
@@ -134,7 +142,7 @@ export default function MaterialCategoriesPage({ token, notify, t }: Props) {
                 </td>
               </tr>
             )) : (
-              <tr><td className="empty-cell" colSpan={7}>{t('noData')}</td></tr>
+              <tr><td className="empty-cell" colSpan={8}>{t('noData')}</td></tr>
             )}
           </tbody>
         </table>
@@ -145,6 +153,10 @@ export default function MaterialCategoriesPage({ token, notify, t }: Props) {
           <div className="form-field">
             <label>Material Category</label>
             <input value={name} onChange={(e) => setName(e.target.value)} required />
+          </div>
+          <div className="form-field">
+            <label>Code</label>
+            <input value={code} onChange={(e) => setCode(e.target.value.toUpperCase())} placeholder="Ví dụ: FABRIC / ROPE" />
           </div>
           <div className="form-field">
             <label>Spec Format</label>

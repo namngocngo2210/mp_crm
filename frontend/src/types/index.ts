@@ -138,6 +138,7 @@ export type UnitWeightOption = {
 export type MaterialCategory = {
   id: number
   material_category_name: string
+  material_category_code?: string
   spec_format?: 'size' | 'text'
   format?: string
   created_at?: string
@@ -149,6 +150,7 @@ export type MaterialMaster = {
   material_name: string
   material_category_id?: number
   material_category_name?: string
+  material_category_code?: string
   formula?: string
   lami?: boolean
   created_at?: string
