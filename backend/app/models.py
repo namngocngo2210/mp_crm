@@ -91,21 +91,37 @@ class Product(Base):
     customer = relationship("Customer")
 
 
+class ProductType(Base):
+    __tablename__ = "product_types"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    product_type_name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    formula: Mapped[str | None] = mapped_column(Text)
+    deleted_at: Mapped[str | None] = mapped_column(DateTime)
+    created_at: Mapped[str] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[str] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
 class Item(Base):
     __tablename__ = "items"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     item_name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
-    item_color: Mapped[str | None] = mapped_column(String(100))
-    item_size_mode: Mapped[str] = mapped_column(String(20), nullable=False, default="fixed")
-    item_size_fixed_type: Mapped[str] = mapped_column(String(20), nullable=False, default="number")
-    item_size_value: Mapped[float | None] = mapped_column(Numeric(12, 4))
-    item_size_value_text: Mapped[str | None] = mapped_column(String(100))
-    item_size_formula_code: Mapped[str | None] = mapped_column(String(50))
-    item_size_source_field: Mapped[str | None] = mapped_column(String(30))
+    material_id: Mapped[int | None] = mapped_column(ForeignKey("materials.id", ondelete="SET NULL"), index=True)
+    item_size_source_field: Mapped[str | None] = mapped_column(String(20))
     deleted_at: Mapped[str | None] = mapped_column(DateTime)
     created_at: Mapped[str] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[str] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    material = relationship("Material")
+
+
+class ItemProductType(Base):
+    __tablename__ = "item_product_types"
+
+    item_id: Mapped[int] = mapped_column(ForeignKey("items.id", ondelete="CASCADE"), primary_key=True)
+    product_type_id: Mapped[int] = mapped_column(ForeignKey("product_types.id", ondelete="CASCADE"), primary_key=True)
+    created_at: Mapped[str] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
 
 class RawMaterialPrice(Base):
@@ -130,6 +146,36 @@ class ProcessingPrice(Base):
     deleted_at: Mapped[str | None] = mapped_column(DateTime)
     created_at: Mapped[str] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[str] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class MaterialCategory(Base):
+    __tablename__ = "material_categories"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    material_category_name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    spec_format: Mapped[str] = mapped_column(String(20), nullable=False, default="text")
+    format_value: Mapped[str | None] = mapped_column("format", String(255))
+    deleted_at: Mapped[str | None] = mapped_column(DateTime)
+    created_at: Mapped[str] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[str] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class Material(Base):
+    __tablename__ = "materials"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    material_name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    material_category_id: Mapped[int | None] = mapped_column(
+        ForeignKey("material_categories.id", ondelete="SET NULL"), index=True
+    )
+    formula: Mapped[str | None] = mapped_column(String(255))
+    spec: Mapped[str | None] = mapped_column(String(255))
+    lami: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    deleted_at: Mapped[str | None] = mapped_column(DateTime)
+    created_at: Mapped[str] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[str] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    material_category = relationship("MaterialCategory")
 
 
 class MaterialGroup(Base):
@@ -171,14 +217,36 @@ class UnitWeightOption(Base):
     )
 
 
+class FixedWeightTable(Base):
+    __tablename__ = "fixed_weight_tables"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    material_id: Mapped[int | None] = mapped_column(
+        ForeignKey("materials.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    size_label: Mapped[str] = mapped_column(String(100), nullable=False)
+    unit_weight_value: Mapped[float] = mapped_column(Numeric(12, 5), nullable=False, default=0)
+    unit_price: Mapped[float] = mapped_column(Numeric(12, 4), nullable=False, default=0)
+    deleted_at: Mapped[str | None] = mapped_column(DateTime)
+    created_at: Mapped[str] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[str] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    material = relationship("Material")
+
+    __table_args__ = (
+        UniqueConstraint("material_id", "size_label", name="uq_fwt_material_size"),
+        Index("idx_fwt_material_size", "material_id", "size_label"),
+    )
+
+
 class ProductSpec(Base):
     __tablename__ = "product_specs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True)
     item_id: Mapped[int] = mapped_column(ForeignKey("items.id", ondelete="RESTRICT"), nullable=False, index=True)
-    material_group_id: Mapped[int] = mapped_column(
-        ForeignKey("material_groups.id", ondelete="RESTRICT"), nullable=False, index=True
+    material_group_id: Mapped[int | None] = mapped_column(
+        ForeignKey("material_groups.id", ondelete="SET NULL"), nullable=True, index=True
     )
     line_no: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     spec: Mapped[str | None] = mapped_column(String(255))

@@ -29,7 +29,7 @@ const emptyForm = {
 }
 
 export default function CustomersPage({ token, notify, t }: Props) {
-  const PAGE_SIZE_OPTIONS = [5, 10]
+  const PAGE_SIZE_OPTIONS = [10, 20, 50]
   const [rows, setRows] = useState<Customer[]>([])
   const [search, setSearch] = useState('')
   const [form, setForm] = useState(emptyForm)
@@ -249,7 +249,7 @@ export default function CustomersPage({ token, notify, t }: Props) {
             <select
               value={pageSize}
               onChange={(e) => {
-                const next = Math.min(10, Math.max(1, Number(e.target.value) || 10))
+                const next = Math.min(50, Math.max(10, Number(e.target.value) || 10))
                 setPageSize(next)
                 setPage(1)
               }}

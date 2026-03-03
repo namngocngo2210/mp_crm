@@ -3,7 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import Select from 'react-select'
 import { CheckCircle2, Eye, FileSpreadsheet, Pencil, Plus, Trash2, Upload, X, XCircle } from 'lucide-react'
 import { api, API_BASE } from '../lib/api'
-import { Customer, Item, MaterialGroup, PrintImage, Product, ProductSpec } from '../types'
+import { Customer, FixedWeightTable, Item, MaterialMaster, PrintImage, Product, ProductSpec, ProductType } from '../types'
 import { I18nKey } from '../lib/i18n'
 import ConfirmModal from '../components/ConfirmModal'
 import FormModal from '../components/FormModal'
@@ -15,8 +15,6 @@ type BulkSpecRow = {
   key: number
   item_id: number
   item_name: string
-  material_group_id?: number
-  material_group?: string
   lami: string
   spec: string
   item_size: string
@@ -36,7 +34,7 @@ type SpecEditRow = {
   other_note: string
 }
 
-const PRODUCT_TYPES = [
+const DEFAULT_PRODUCT_TYPES = [
   'BELT UPANEL',
   'ROPE UPANEL',
   'BELT TUBULAR',
@@ -57,8 +55,7 @@ const productInit = {
   customer_id: '',
   product_code: '',
   product_name: '',
-  type: PRODUCT_TYPES[0],
-  type_other: '',
+  type: DEFAULT_PRODUCT_TYPES[0],
   sewing_type: SEWING_TYPES[0],
   sewing_type_other: '',
   print: 'yes',
@@ -79,15 +76,20 @@ export default function ProductsPage({ token, notify, t }: Props) {
   const detailMatch = location.pathname.match(/^\/products\/(\d+)$/)
   const detailProductId = detailMatch ? Number(detailMatch[1]) : null
   const isDetailPage = !!detailProductId
-  const PAGE_SIZE_OPTIONS = [5, 10]
+  const PAGE_SIZE_OPTIONS = [10, 20, 50]
   const [customers, setCustomers] = useState<Customer[]>([])
   const [items, setItems] = useState<Item[]>([])
-  const [materialGroups, setMaterialGroups] = useState<MaterialGroup[]>([])
+  const [materials, setMaterials] = useState<MaterialMaster[]>([])
+  const [fixedWeightTables, setFixedWeightTables] = useState<FixedWeightTable[]>([])
+  const [productTypes, setProductTypes] = useState<ProductType[]>([])
   const [products, setProducts] = useState<Product[]>([])
   const [search, setSearch] = useState('')
   const [form, setForm] = useState(productInit)
   const [editingId, setEditingId] = useState<number | null>(null)
+  const [editingOriginalType, setEditingOriginalType] = useState('')
   const [showForm, setShowForm] = useState(false)
+  const [showTypeChangeConfirm, setShowTypeChangeConfirm] = useState(false)
+  const [pendingSavePayload, setPendingSavePayload] = useState<Record<string, unknown> | null>(null)
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null)
   const [specs, setSpecs] = useState<ProductSpec[]>([])
   const [specEdits, setSpecEdits] = useState<Record<number, SpecEditRow>>({})
@@ -113,27 +115,67 @@ export default function ProductsPage({ token, notify, t }: Props) {
     value: c.id,
     label: `${c.customer_code} - ${c.customer_name}`,
   }))
-  const itemOptions: Option[] = items.map((it) => ({ value: it.id, label: it.item_name }))
+  const currentProductType = (selectedProduct?.type || '').trim().toUpperCase()
+  const filteredItems = currentProductType
+    ? items.filter((it) => (it.product_type_names || []).map((x) => (x || '').toUpperCase()).includes(currentProductType))
+    : items
+  const itemOptions: Option[] = filteredItems.map((it) => ({ value: it.id, label: it.item_name }))
   const customerNameById = useMemo(
     () => new Map(customers.map((c) => [c.id, c.customer_name || c.customer_code || String(c.id)])),
     [customers],
   )
   const itemById = useMemo(() => new Map(items.map((it) => [it.id, it])), [items])
-  const materialGroupById = useMemo(() => new Map(materialGroups.map((m) => [m.id, m])), [materialGroups])
+  const materialById = useMemo(() => new Map(materials.map((m) => [m.id, m])), [materials])
+  const fixedByMaterialId = useMemo(() => {
+    const map = new Map<number, FixedWeightTable[]>()
+    fixedWeightTables.forEach((r) => {
+      const materialId = Number(r.material_id || 0)
+      if (!materialId) return
+      if (!map.has(materialId)) map.set(materialId, [])
+      map.get(materialId)!.push(r)
+    })
+    map.forEach((arr) => arr.sort((a, b) => a.id - b.id))
+    return map
+  }, [fixedWeightTables])
 
   const selectedCustomerOption = customerOptions.find((o) => String(o.value) === form.customer_id) || null
-  const typeMode = PRODUCT_TYPES.includes(form.type) ? form.type : (form.type ? 'OTHER' : PRODUCT_TYPES[0])
+  const productTypeValues = useMemo(
+    () => (productTypes.length > 0 ? productTypes.map((x) => (x.product_type_name || '').toUpperCase()).filter(Boolean) : DEFAULT_PRODUCT_TYPES),
+    [productTypes],
+  )
+  const productTypeFormulaByName = useMemo(() => {
+    const map = new Map<string, string>()
+    productTypes.forEach((pt) => {
+      const key = (pt.product_type_name || '').toUpperCase().trim()
+      if (!key) return
+      map.set(key, (pt.formula || '').trim())
+    })
+    return map
+  }, [productTypes])
+  const selectedProductType = productTypeValues.includes((form.type || '').toUpperCase())
+    ? (form.type || '').toUpperCase()
+    : (productTypeValues[0] || DEFAULT_PRODUCT_TYPES[0])
   const sewingMode = SEWING_TYPES.includes(form.sewing_type) ? form.sewing_type : (form.sewing_type ? 'OTHER' : SEWING_TYPES[0])
+  const resetProductForm = () => {
+    setForm({
+      ...productInit,
+      type: productTypeValues[0] || DEFAULT_PRODUCT_TYPES[0],
+    })
+  }
 
   const loadReferenceData = async () => {
-    const [cus, it, mg] = await Promise.all([
+    const [cus, it, mats, fwt, ptypes] = await Promise.all([
       api<Customer[]>('/api/customers', 'GET', undefined, token),
       api<Item[]>('/api/items', 'GET', undefined, token),
-      api<MaterialGroup[]>('/api/material-groups', 'GET', undefined, token),
+      api<MaterialMaster[]>('/api/materials', 'GET', undefined, token),
+      api<FixedWeightTable[]>('/api/fixed-weight-tables', 'GET', undefined, token),
+      api<ProductType[]>('/api/product-types', 'GET', undefined, token),
     ])
     setCustomers(cus)
     setItems(it)
-    setMaterialGroups(mg)
+    setMaterials(mats)
+    setFixedWeightTables(fwt)
+    setProductTypes(ptypes)
   }
 
   const loadProductList = async () => {
@@ -214,7 +256,7 @@ export default function ProductsPage({ token, notify, t }: Props) {
       const next: Record<number, SpecEditRow> = {}
       specs.forEach((s) => {
         next[s.id] = prev[s.id] || {
-          lami: s.lami || '-',
+          lami: s.lami || 'No',
           spec: s.spec || '',
           item_size: s.item_size || '',
           item_color: s.item_color || '',
@@ -226,23 +268,21 @@ export default function ProductsPage({ token, notify, t }: Props) {
     })
   }, [specs])
 
-  const saveProduct = async (e: FormEvent) => {
-    e.preventDefault()
+  const doSaveProduct = async (payload: Record<string, unknown>) => {
     setError('')
     try {
-      const payload = {
-        ...form,
-        customer_id: Number(form.customer_id),
-        type: (typeMode === 'OTHER' ? form.type_other : (form.type || PRODUCT_TYPES[0])).toUpperCase(),
-        sewing_type: (sewingMode === 'OTHER' ? form.sewing_type_other : (form.sewing_type || SEWING_TYPES[0])).toUpperCase(),
-      }
       if (editingId) {
-        await api(`/api/products/${editingId}`, 'PUT', payload, token)
+        const updated = await api<Product & { removed_spec_count?: number; removed_spec_items?: string[] }>(`/api/products/${editingId}`, 'PUT', payload, token)
+        if ((updated.removed_spec_count || 0) > 0) {
+          const names = (updated.removed_spec_items || []).join(', ')
+          notify(`Đã xóa ${updated.removed_spec_count} Product Spec không thuộc loại mới${names ? `: ${names}` : ''}`, 'success')
+        }
       } else {
         await api('/api/products', 'POST', payload, token)
       }
-      setForm(productInit)
+      resetProductForm()
       setEditingId(null)
+      setEditingOriginalType('')
       setShowForm(false)
       await loadBase()
       if (detailProductId) {
@@ -257,14 +297,33 @@ export default function ProductsPage({ token, notify, t }: Props) {
     }
   }
 
+  const saveProduct = async (e: FormEvent) => {
+    e.preventDefault()
+    const payload = {
+      ...form,
+      customer_id: Number(form.customer_id),
+      type: (form.type || productTypeValues[0]).toUpperCase(),
+      sewing_type: (sewingMode === 'OTHER' ? form.sewing_type_other : (form.sewing_type || SEWING_TYPES[0])).toUpperCase(),
+    }
+    const nextType = String(payload.type || '').toUpperCase()
+    if (editingId && editingOriginalType && editingOriginalType !== nextType) {
+      setPendingSavePayload(payload)
+      setShowTypeChangeConfirm(true)
+      return
+    }
+    await doSaveProduct(payload)
+  }
+
   const startEditProduct = (p: Product) => {
     setEditingId(p.id)
+    setEditingOriginalType((p.type || '').toUpperCase())
     setForm({
       customer_id: String(p.customer_id),
       product_code: p.product_code || '',
       product_name: p.product_name || '',
-      type: (p.type || PRODUCT_TYPES[0]).toUpperCase(),
-      type_other: PRODUCT_TYPES.includes((p.type || '').toUpperCase()) ? '' : ((p.type || '').toUpperCase()),
+      type: productTypeValues.includes((p.type || '').toUpperCase())
+        ? (p.type || '').toUpperCase()
+        : (productTypeValues[0] || DEFAULT_PRODUCT_TYPES[0]),
       sewing_type: (p.sewing_type || SEWING_TYPES[0]).toUpperCase(),
       sewing_type_other: SEWING_TYPES.includes((p.sewing_type || '').toUpperCase()) ? '' : ((p.sewing_type || '').toUpperCase()),
       print: p.print || 'yes',
@@ -349,12 +408,27 @@ export default function ProductsPage({ token, notify, t }: Props) {
   }
 
   const resolveItemColor = (itemId: number) => {
-    const itemColor = (itemById.get(itemId)?.item_color || '').trim()
-    if (itemColor) return itemColor
     const productColor = (selectedProduct?.color || '').trim()
     if (productColor) return productColor
     return '-'
   }
+
+  const materialForItem = (itemId: number) => {
+    const item = itemById.get(itemId)
+    if (!item?.material_id) return null
+    return materialById.get(item.material_id) || null
+  }
+
+  const isFabricMaterial = (material: MaterialMaster | null) => {
+    const name = (material?.material_category_name || '').toLowerCase()
+    return name.includes('vải') || name.includes('vai')
+  }
+
+  const isRopeMaterial = (material: MaterialMaster | null) => {
+    const name = (material?.material_category_name || '').toLowerCase()
+    return name.includes('dây') || name.includes('day')
+  }
+  const showLamiForItem = (itemId: number) => !isRopeMaterial(materialForItem(itemId))
 
   const onBulkItemsChange = (opts: readonly Option[]) => {
     const selectedOpts = [...opts]
@@ -364,44 +438,42 @@ export default function ProductsPage({ token, notify, t }: Props) {
       selectedOpts.map((opt, idx) => {
         const existing = prevMap.get(opt.value)
         if (existing) return existing
-        const initialSpec = (selectedProduct?.spec_inner || '').trim()
+        const material = materialForItem(opt.value)
+        const fixedOptions = material ? (fixedByMaterialId.get(material.id) || []) : []
+        const initialSpec = isRopeMaterial(material)
+          ? (fixedOptions[0]?.size_label || '')
+          : (material?.spec || '').trim()
         const initialItemSize = computeItemSizeByItem(itemById.get(opt.value), initialSpec)
+        const initialLami = material?.lami ? 'Yes' : 'No'
+        const initialUw = computeUnitWeightByMaterial(material, initialSpec, initialLami)
         return {
           key: Date.now() + idx,
           item_id: opt.value,
           item_name: opt.label,
-          lami: '-',
-          spec: '',
+          lami: initialLami,
+          spec: initialSpec,
           item_size: initialItemSize,
           item_color: resolveItemColor(opt.value),
           other_note: '',
           pcs_ea: '1',
-          unit_weight_kg: '-',
+          unit_weight_kg: initialUw,
           qty_m_or_m2: computeQtyFromItemSize(initialItemSize),
-          wt_kg: computeWtTextFromValues(computeQtyFromItemSize(initialItemSize), '-', '-'),
+          wt_kg: computeWtTextFromValues(computeQtyFromItemSize(initialItemSize), '1', initialUw),
         }
       }),
     )
   }
 
-  const computeUnitWeightByMaterialGroup = (mg: MaterialGroup | undefined, specValue: string) => {
-    if (!mg) return '-'
-    const applyLamiCalc = (base: number) => {
-      if (!mg.use_lami_for_calc) return base
-      if (mg.lami_calc_value == null || Number.isNaN(Number(mg.lami_calc_value))) return Number.NaN
-      return base + Number(mg.lami_calc_value)
+  const computeUnitWeightByMaterial = (material: MaterialMaster | null, specValue: string, lamiValue?: string) => {
+    if (!material) return '-'
+    if (isRopeMaterial(material)) {
+      const options = fixedByMaterialId.get(material.id) || []
+      const hit = options.find((x) => (x.size_label || '').trim() === (specValue || '').trim())
+      if (!hit || hit.unit_weight_value == null || Number.isNaN(Number(hit.unit_weight_value))) return '-'
+      return String(hit.unit_weight_value)
     }
-    if ((mg.unit_weight_mode || 'fixed') === 'fixed') {
-      if (mg.unit_weight_value == null || Number.isNaN(Number(mg.unit_weight_value))) return '-'
-      const result = applyLamiCalc(Number(mg.unit_weight_value))
-      return Number.isNaN(result) ? '-' : String(result)
-    }
-    if ((mg.unit_weight_mode || '').toLowerCase() === 'choice') {
-      if (mg.unit_weight_value == null || Number.isNaN(Number(mg.unit_weight_value))) return '-'
-      const result = applyLamiCalc(Number(mg.unit_weight_value))
-      return Number.isNaN(result) ? '-' : String(result)
-    }
-    const expr = (mg.unit_weight_formula || mg.unit_weight_formula_code || '').trim()
+    if (!isFabricMaterial(material)) return '-'
+    const expr = (material.formula || '').trim()
     if (!expr || !FORMULA_ALLOWED_REGEX.test(expr) || !SPEC_ABC_REGEX.test(specValue || '')) return '-'
     const parts = (specValue || '').split('*').map((p) => p.trim())
     if (parts.length !== 3) return '-'
@@ -418,7 +490,8 @@ export default function ProductsPage({ token, notify, t }: Props) {
       // eslint-disable-next-line no-new-func
       const rawResult = Function(`"use strict"; return (${replaced});`)()
       if (typeof rawResult !== 'number' || Number.isNaN(rawResult) || !Number.isFinite(rawResult)) return '-'
-      const result = applyLamiCalc(rawResult)
+      const useLami = (lamiValue || '').toLowerCase() === 'yes'
+      const result = rawResult + (useLami ? 0.025 : 0)
       if (Number.isNaN(result) || !Number.isFinite(result)) return '-'
       return String(result)
     } catch {
@@ -453,23 +526,17 @@ export default function ProductsPage({ token, notify, t }: Props) {
 
   const computeItemSizeByItem = (itemRow: Item | undefined, fallbackSpec: string) => {
     if (!itemRow) return '-'
-    const mode = (itemRow.item_size_mode || 'fixed').toLowerCase()
-    if (mode === 'fixed') {
-      if ((itemRow.item_size_fixed_type || 'number') === 'ab') {
-        return itemRow.item_size_value_text || '-'
-      }
-      if (itemRow.item_size_value == null || Number.isNaN(Number(itemRow.item_size_value))) return '-'
-      return String(itemRow.item_size_value)
-    }
     const sourceValue = resolveItemSizeSourceValue(itemRow, fallbackSpec)
-    const formula = (itemRow.item_size_formula || itemRow.item_size_formula_code || '').trim()
-    if ((itemRow.item_size_source_field || '').toLowerCase() === 'liner' && !formula) {
+    const sourceField = (itemRow.item_size_source_field || 'spec_inner').toLowerCase()
+    const selectedType = (selectedProduct?.type || '').toUpperCase().trim()
+    const formula = selectedType ? (productTypeFormulaByName.get(selectedType) || '') : ''
+    if (sourceField === 'liner' && !formula) {
       return sourceValue || '-'
     }
     if (!formula || !FORMULA_ALLOWED_REGEX.test(formula)) return '-'
     const pair = splitTopLevelStar(formula)
     if (!pair) return '-'
-    const sourceIsAB = ['top', 'bottom'].includes((itemRow.item_size_source_field || '').toLowerCase())
+    const sourceIsAB = ['top', 'bottom'].includes(sourceField)
     if (sourceIsAB && !SPEC_AB_REGEX.test(sourceValue || '')) return '-'
     if (!sourceIsAB && !SPEC_ABC_REGEX.test(sourceValue || '')) return '-'
     const parts = (sourceValue || '').split('*').map((p) => p.trim())
@@ -532,70 +599,56 @@ export default function ProductsPage({ token, notify, t }: Props) {
     return result == null ? '-' : String(result)
   }
 
-  const formatNumber2 = (value: number | null | undefined) => {
+  const formatQty2 = (value: number | null | undefined) => {
     if (value == null || Number.isNaN(value) || !Number.isFinite(value)) return '-'
     return value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
   }
 
-  const onBulkRowMaterialGroupChange = (rowKey: number, value: string) => {
-    const mgId = value ? Number(value) : undefined
-    const mg = mgId ? materialGroupById.get(mgId) : undefined
-    setBulkSpecRows((prev) =>
-      prev.map((row) => {
-        if (row.key !== rowKey) return row
-        const nextSpec = mg?.spec_label || row.spec || (selectedProduct?.spec_inner || '')
-        const nextItemSize = computeItemSizeByItem(itemById.get(row.item_id), nextSpec)
-        const nextPcs = mg?.pcs_ea_label || '1'
-        return {
-          ...row,
-          material_group_id: mg?.id,
-          material_group: mg?.material_group_name,
-          lami: mg?.has_lami ? 'Yes' : '-',
-          spec: nextSpec,
-          item_size: nextItemSize,
-          item_color: resolveItemColor(row.item_id),
-          pcs_ea: nextPcs,
-          unit_weight_kg: computeUnitWeightByMaterialGroup(mg, nextSpec),
-          qty_m_or_m2: computeQtyFromItemSize(nextItemSize),
-          wt_kg: computeWtTextFromValues(
-            computeQtyFromItemSize(nextItemSize),
-            nextPcs,
-            computeUnitWeightByMaterialGroup(mg, nextSpec),
-          ),
-        }
-      }),
-    )
+  const formatWeight5 = (value: number | null | undefined) => {
+    if (value == null || Number.isNaN(value) || !Number.isFinite(value)) return '-'
+    return value.toLocaleString(undefined, { minimumFractionDigits: 5, maximumFractionDigits: 5 })
+  }
+
+  const onBulkRowItemColorChange = (rowKey: number, value: string) => {
+    setBulkSpecRows((prev) => prev.map((row) => (row.key === rowKey ? { ...row, item_color: value } : row)))
   }
 
   const onBulkRowSpecChange = (rowKey: number, value: string) => {
     setBulkSpecRows((prev) =>
       prev.map((row) => {
         if (row.key !== rowKey) return row
-        const mg = row.material_group_id ? materialGroupById.get(row.material_group_id) : undefined
-        const nextSpec = value || (selectedProduct?.spec_inner || '')
+        const material = materialForItem(row.item_id)
+        const nextSpec = value
         const nextItemSize = computeItemSizeByItem(itemById.get(row.item_id), nextSpec)
+        const nextQty = computeQtyFromItemSize(nextItemSize)
+        const nextUw = computeUnitWeightByMaterial(material, nextSpec, row.lami)
         return {
           ...row,
-          spec: value,
+          spec: nextSpec,
           item_size: nextItemSize,
-          unit_weight_kg: computeUnitWeightByMaterialGroup(mg, nextSpec),
-          qty_m_or_m2: computeQtyFromItemSize(nextItemSize),
-          wt_kg: computeWtTextFromValues(
-            computeQtyFromItemSize(nextItemSize),
-            row.pcs_ea,
-            computeUnitWeightByMaterialGroup(mg, nextSpec),
-          ),
+          qty_m_or_m2: nextQty,
+          unit_weight_kg: nextUw,
+          wt_kg: computeWtTextFromValues(nextQty, row.pcs_ea, nextUw),
         }
       }),
     )
   }
 
   const onBulkRowLamiChange = (rowKey: number, value: string) => {
-    setBulkSpecRows((prev) => prev.map((row) => (row.key === rowKey ? { ...row, lami: value || '-' } : row)))
-  }
-
-  const onBulkRowItemColorChange = (rowKey: number, value: string) => {
-    setBulkSpecRows((prev) => prev.map((row) => (row.key === rowKey ? { ...row, item_color: value } : row)))
+    setBulkSpecRows((prev) =>
+      prev.map((row) => {
+        if (row.key !== rowKey) return row
+        const material = materialForItem(row.item_id)
+        const nextLami = value || 'No'
+        const nextUw = computeUnitWeightByMaterial(material, row.spec, nextLami)
+        return {
+          ...row,
+          lami: nextLami,
+          unit_weight_kg: nextUw,
+          wt_kg: computeWtTextFromValues(row.qty_m_or_m2, row.pcs_ea, nextUw),
+        }
+      }),
+    )
   }
 
   const onBulkRowNoteChange = (rowKey: number, value: string) => {
@@ -635,19 +688,24 @@ export default function ProductsPage({ token, notify, t }: Props) {
       prev.map((row) => {
         const needsInit = !row.item_size || row.item_size === '-'
         if (!needsInit) return row
-        const nextSpec = row.spec || (selectedProduct?.spec_inner || '')
+        const mat = materialForItem(row.item_id)
+        const nextSpec = row.spec || (mat?.spec || '')
         const nextItemSize = computeItemSizeByItem(itemById.get(row.item_id), nextSpec)
+        const nextUw = computeUnitWeightByMaterial(mat, nextSpec, row.lami)
         return {
           ...row,
+          lami: mat?.lami ? 'Yes' : 'No',
+          spec: nextSpec,
           item_size: nextItemSize,
           qty_m_or_m2: computeQtyFromItemSize(nextItemSize),
-          wt_kg: computeWtTextFromValues(computeQtyFromItemSize(nextItemSize), row.pcs_ea, row.unit_weight_kg),
+          unit_weight_kg: nextUw,
+          wt_kg: computeWtTextFromValues(computeQtyFromItemSize(nextItemSize), row.pcs_ea, nextUw),
           item_color: row.item_color || resolveItemColor(row.item_id),
           other_note: row.other_note || '',
         }
       }),
     )
-  }, [showBulkSpecModal, bulkSpecRows.length, itemById, selectedProduct])
+  }, [showBulkSpecModal, bulkSpecRows.length, itemById, selectedProduct, materialById, fixedByMaterialId, productTypeFormulaByName])
 
   const getSpecWt = (s: ProductSpec): number | null => {
     const direct = toFiniteNumber(s.wt_kg)
@@ -659,6 +717,8 @@ export default function ProductsPage({ token, notify, t }: Props) {
     const wt = getSpecWt(s)
     return sum + (wt ?? 0)
   }, 0)
+  const showLamiColumnInSpecs = specs.some((s) => !isRopeMaterial(materialForItem(s.item_id)))
+  const showLamiColumnInBulk = bulkSpecRows.some((r) => !isRopeMaterial(materialForItem(r.item_id)))
 
   const saveBulkSpecs = async () => {
     if (!detailProductId) return
@@ -666,9 +726,9 @@ export default function ProductsPage({ token, notify, t }: Props) {
       notify('Vui lòng chọn item để tạo Product Specs', 'error')
       return
     }
-    const invalidRow = bulkSpecRows.find((r) => !r.material_group_id)
+    const invalidRow = bulkSpecRows.find((r) => !materialForItem(r.item_id))
     if (invalidRow) {
-      notify(`Vui lòng chọn Material Group cho item ${invalidRow.item_name}`, 'error')
+      notify(`Item ${invalidRow.item_name} chưa gán material`, 'error')
       return
     }
     try {
@@ -676,8 +736,7 @@ export default function ProductsPage({ token, notify, t }: Props) {
         const resolvedColor = resolveItemColor(row.item_id)
         await api(`/api/products/${detailProductId}/specs`, 'POST', {
           item_id: row.item_id,
-          material_group_id: row.material_group_id,
-          lami: row.lami !== '-' ? row.lami : null,
+          lami: showLamiForItem(row.item_id) ? row.lami : null,
           spec: row.spec || null,
           item_color: resolvedColor !== '-' ? resolvedColor : null,
           other_note: row.other_note || null,
@@ -711,7 +770,7 @@ export default function ProductsPage({ token, notify, t }: Props) {
     setSpecEdits((prev) => ({
       ...prev,
       [specId]: {
-        lami: prev[specId]?.lami ?? '-',
+        lami: prev[specId]?.lami ?? 'No',
         spec: prev[specId]?.spec ?? '',
         item_size: prev[specId]?.item_size ?? '',
         item_color: prev[specId]?.item_color ?? '',
@@ -722,11 +781,20 @@ export default function ProductsPage({ token, notify, t }: Props) {
     }))
   }
 
-  const saveSpecInline = async (specRow: ProductSpec) => {
-    const draft = specEdits[specRow.id]
+  const saveSpecInline = async (specRow: ProductSpec, override?: Partial<SpecEditRow>) => {
+    const draft = {
+      lami: specEdits[specRow.id]?.lami ?? 'No',
+      spec: specEdits[specRow.id]?.spec ?? '',
+      item_size: specEdits[specRow.id]?.item_size ?? '',
+      item_color: specEdits[specRow.id]?.item_color ?? '',
+      pcs_ea: specEdits[specRow.id]?.pcs_ea ?? '',
+      other_note: specEdits[specRow.id]?.other_note ?? '',
+      ...(override || {}),
+    }
     if (!draft) return
+    const editableLamiSpec = showLamiForItem(specRow.item_id)
     const normalizedCurrent = {
-      lami: specRow.lami || '-',
+      lami: specRow.lami || 'No',
       spec: specRow.spec || '',
       item_size: specRow.item_size || '',
       item_color: specRow.item_color || '',
@@ -734,7 +802,7 @@ export default function ProductsPage({ token, notify, t }: Props) {
       other_note: specRow.other_note || '',
     }
     if (
-      draft.lami === normalizedCurrent.lami
+      (!editableLamiSpec || draft.lami === normalizedCurrent.lami)
       && draft.spec === normalizedCurrent.spec
       && draft.item_size === normalizedCurrent.item_size
       && draft.item_color === normalizedCurrent.item_color
@@ -744,7 +812,7 @@ export default function ProductsPage({ token, notify, t }: Props) {
 
     try {
       await api(`/api/product-specs/${specRow.id}`, 'PUT', {
-        lami: draft.lami !== '-' ? draft.lami : null,
+        lami: editableLamiSpec ? (draft.lami || null) : null,
         spec: draft.spec || null,
         item_size: draft.item_size || null,
         item_color: draft.item_color || null,
@@ -895,7 +963,7 @@ export default function ProductsPage({ token, notify, t }: Props) {
     <FormModal
       open={showForm}
       title={editingId ? t('edit') : t('addProduct')}
-      onClose={() => { setShowForm(false); setForm(productInit); setEditingId(null); setError('') }}
+      onClose={() => { setShowForm(false); resetProductForm(); setEditingId(null); setEditingOriginalType(''); setError('') }}
     >
       <form onSubmit={saveProduct}>
         <div className="grid-2">
@@ -914,27 +982,10 @@ export default function ProductsPage({ token, notify, t }: Props) {
           <div className="form-field"><label>{t('lblProductName')}</label><input placeholder={t('phProductName')} value={form.product_name} onChange={(e) => setForm({ ...form, product_name: e.target.value })} required /></div>
           <div className="form-field">
             <label>{t('lblType')}</label>
-            <select
-              value={typeMode}
-              onChange={(e) => {
-                const next = e.target.value
-                if (next === 'OTHER') {
-                  setForm({ ...form, type: form.type_other || '', type_other: form.type_other || '' })
-                } else {
-                  setForm({ ...form, type: next, type_other: '' })
-                }
-              }}
-            >
-              {PRODUCT_TYPES.map((tp) => <option key={tp} value={tp}>{tp}</option>)}
-              <option value="OTHER">{t('other').toUpperCase()}</option>
+            <select value={selectedProductType} onChange={(e) => setForm({ ...form, type: e.target.value })}>
+              {productTypeValues.map((tp) => <option key={tp} value={tp}>{tp}</option>)}
             </select>
           </div>
-          {typeMode === 'OTHER' ? (
-            <div className="form-field">
-              <label>{t('other').toUpperCase()}</label>
-              <input value={form.type_other} onChange={(e) => setForm({ ...form, type_other: e.target.value.toUpperCase(), type: e.target.value.toUpperCase() })} />
-            </div>
-          ) : null}
           <div className="form-field">
             <label>{t('lblSewingType')}</label>
             <select
@@ -996,7 +1047,7 @@ export default function ProductsPage({ token, notify, t }: Props) {
         {error ? <div className="error">{error}</div> : null}
         <div className="row form-actions">
           <button className="primary" type="submit">{t('save')}</button>
-          <button type="button" onClick={() => { setShowForm(false); setForm(productInit); setEditingId(null); setError('') }}>{t('cancel')}</button>
+          <button type="button" onClick={() => { setShowForm(false); resetProductForm(); setEditingId(null); setEditingOriginalType(''); setError('') }}>{t('cancel')}</button>
         </div>
       </form>
     </FormModal>
@@ -1074,7 +1125,7 @@ export default function ProductsPage({ token, notify, t }: Props) {
                 <thead>
                   <tr>
                     <th><input type="checkbox" checked={allSpecsSelected} onChange={(e) => toggleSelectAllSpecs(e.target.checked)} /></th>
-                    <th>{t('colItemName')}</th><th>{t('colMaterialGroup')}</th><th className="col-lami">{t('fldLami')}</th><th className="col-spec">{t('fldSpec')}</th><th className="col-item-size">{t('fldItemSize')}</th><th className="col-item-color">{t('fldItemColor')}</th><th>{t('fldPcsEa')}</th><th>{t('colUnitWeightKg')}</th><th>{t('colQtyMOrM2')}</th><th>{t('colWtKg')}</th>
+                    <th>{t('colItemName')}</th>{showLamiColumnInSpecs ? <th className="col-lami">{t('fldLami')}</th> : null}<th className="col-spec">{t('fldSpec')}</th><th className="col-item-size">{t('fldItemSize')}</th><th className="col-item-color">{t('fldItemColor')}</th><th>{t('fldPcsEa')}</th><th>{t('colUnitWeightKg')}</th><th>{t('colQtyMOrM2')}</th><th>{t('colWtKg')}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1082,24 +1133,45 @@ export default function ProductsPage({ token, notify, t }: Props) {
                     <tr key={`${s.id}-main`}>
                         <td><input type="checkbox" checked={selectedSpecIds.has(s.id)} onChange={(e) => toggleSelectSpecRow(s.id, e.target.checked)} /></td>
                         <td>{s.item_name}</td>
-                        <td>{s.material_group || '-'}</td>
-                        <td className="spec-edit-lami">
-                          <select
-                            value={specEdits[s.id]?.lami ?? (s.lami || '-')}
-                            onChange={(e) => updateSpecEditField(s.id, 'lami', e.target.value)}
-                            onBlur={() => void saveSpecInline(s)}
-                          >
-                            <option value="-">-</option>
-                            <option value="Yes">Yes</option>
-                            <option value="No">No</option>
-                          </select>
-                        </td>
-                        <td className="spec-edit-spec">
-                          <input
-                            value={specEdits[s.id]?.spec ?? (s.spec || '')}
-                            onChange={(e) => updateSpecEditField(s.id, 'spec', e.target.value)}
-                            onBlur={() => void saveSpecInline(s)}
-                          />
+                        {showLamiColumnInSpecs ? (
+                          <td>
+                            {showLamiForItem(s.item_id) ? (
+                              <select
+                                value={specEdits[s.id]?.lami ?? (s.lami || 'No')}
+                                onChange={(e) => updateSpecEditField(s.id, 'lami', e.target.value)}
+                                onBlur={() => void saveSpecInline(s)}
+                              >
+                                <option value="Yes">Yes</option>
+                                <option value="No">No</option>
+                              </select>
+                            ) : '-'}
+                          </td>
+                        ) : null}
+                        <td>
+                          {showLamiForItem(s.item_id) ? (
+                            <input
+                              value={specEdits[s.id]?.spec ?? (s.spec || '')}
+                              onChange={(e) => updateSpecEditField(s.id, 'spec', e.target.value)}
+                              onBlur={() => void saveSpecInline(s)}
+                            />
+                          ) : (() => {
+                            const material = materialForItem(s.item_id)
+                            const options = material ? (fixedByMaterialId.get(material.id) || []) : []
+                            if (options.length === 0) return (s.spec || '-')
+                            const currentValue = specEdits[s.id]?.spec ?? (s.spec || options[0].size_label)
+                            return (
+                              <select
+                                value={currentValue}
+                                onChange={(e) => {
+                                  const next = e.target.value
+                                  updateSpecEditField(s.id, 'spec', next)
+                                  void saveSpecInline(s, { spec: next })
+                                }}
+                              >
+                                {options.map((o) => <option key={o.id} value={o.size_label}>{o.size_label}</option>)}
+                              </select>
+                            )
+                          })()}
                         </td>
                         <td className="spec-edit-size">
                           <input
@@ -1125,12 +1197,12 @@ export default function ProductsPage({ token, notify, t }: Props) {
                             placeholder={t('fldPcsEa')}
                           />
                         </td>
-                        <td>{formatNumber2(toFiniteNumber(s.unit_weight_kg))}</td>
-                        <td>{formatNumber2(toFiniteNumber(s.qty_m_or_m2))}</td>
-                        <td>{formatNumber2(getSpecWt(s))}</td>
+                        <td>{formatWeight5(toFiniteNumber(s.unit_weight_kg))}</td>
+                        <td>{formatQty2(toFiniteNumber(s.qty_m_or_m2))}</td>
+                        <td>{formatWeight5(getSpecWt(s))}</td>
                     </tr>,
                     <tr className="spec-note-row" key={`${s.id}-note`}>
-                        <td colSpan={5}>
+                        <td colSpan={showLamiColumnInSpecs ? 4 : 3}>
                           <div className="spec-note-wrap">
                             <span>{t('lblOtherNote')}:</span>
                             <input
@@ -1141,13 +1213,13 @@ export default function ProductsPage({ token, notify, t }: Props) {
                             />
                           </div>
                         </td>
-                        <td colSpan={6} />
+                        <td colSpan={showLamiColumnInSpecs ? 6 : 5} />
                     </tr>,
-                  ])) : <tr><td className="empty-cell" colSpan={11}>{t('noData')}</td></tr>}
+                  ])) : <tr><td className="empty-cell" colSpan={showLamiColumnInSpecs ? 10 : 9}>{t('noData')}</td></tr>}
                   {specs.length > 0 ? (
                     <tr className="summary-row">
-                      <td colSpan={10} className="summary-label">{t('totalWtKg')}</td>
-                      <td className="summary-value">{formatNumber2(totalSpecWt)}</td>
+                      <td colSpan={showLamiColumnInSpecs ? 9 : 8} className="summary-label">{t('totalWtKg')}</td>
+                      <td className="summary-value">{formatWeight5(totalSpecWt)}</td>
                     </tr>
                   ) : null}
                 </tbody>
@@ -1237,39 +1309,60 @@ export default function ProductsPage({ token, notify, t }: Props) {
             <table>
               <thead>
                 <tr>
-                  <th>{t('colItemName')}</th><th>{t('colMaterialGroup')}</th><th>{t('fldLami')}</th><th>{t('fldSpec')}</th><th>{t('fldItemSize')}</th><th>{t('fldItemColor')}</th><th>{t('fldPcsEa')}</th><th>{t('colUnitWeightKg')}</th><th>{t('colQtyMOrM2')}</th><th>{t('colWtKg')}</th>
+                  <th>{t('colItemName')}</th>{showLamiColumnInBulk ? <th>{t('fldLami')}</th> : null}<th>{t('fldSpec')}</th><th>{t('fldItemSize')}</th><th>{t('fldItemColor')}</th><th>{t('fldPcsEa')}</th><th>{t('colUnitWeightKg')}</th><th>{t('colQtyMOrM2')}</th><th>{t('colWtKg')}</th>
                 </tr>
               </thead>
               <tbody>
                 {bulkSpecRows.length > 0 ? bulkSpecRows.flatMap((row) => ([
                   <tr key={`${row.key}-main`}>
                       <td>{row.item_name}</td>
-                      <td><select value={row.material_group_id || ''} onChange={(e) => onBulkRowMaterialGroupChange(row.key, e.target.value)}><option value="">--</option>{materialGroups.map((mg) => <option key={mg.id} value={mg.id}>{mg.material_group_name}</option>)}</select></td>
+                      {showLamiColumnInBulk ? (
+                        <td>
+                          {showLamiForItem(row.item_id) ? (
+                            <select value={row.lami} onChange={(e) => onBulkRowLamiChange(row.key, e.target.value)}>
+                              <option value="Yes">Yes</option>
+                              <option value="No">No</option>
+                            </select>
+                          ) : '-'}
+                        </td>
+                      ) : null}
                       <td>
-                        <select value={row.lami} onChange={(e) => onBulkRowLamiChange(row.key, e.target.value)}>
-                          <option value="-">-</option>
-                          <option value="Yes">Yes</option>
-                          <option value="No">No</option>
-                        </select>
+                        {(() => {
+                          const material = materialForItem(row.item_id)
+                          if (showLamiForItem(row.item_id)) {
+                            return (
+                              <input
+                                value={row.spec}
+                                onChange={(e) => onBulkRowSpecChange(row.key, e.target.value)}
+                              />
+                            )
+                          }
+                          const options = material ? (fixedByMaterialId.get(material.id) || []) : []
+                          if (options.length === 0) return '-'
+                          return (
+                            <select value={row.spec || ''} onChange={(e) => onBulkRowSpecChange(row.key, e.target.value)}>
+                              {options.map((o) => <option key={o.id} value={o.size_label}>{o.size_label}</option>)}
+                            </select>
+                          )
+                        })()}
                       </td>
-                      <td><input value={row.spec} onChange={(e) => onBulkRowSpecChange(row.key, e.target.value)} /></td>
                       <td><input value={row.item_size} onChange={(e) => onBulkRowItemSizeChange(row.key, e.target.value)} placeholder={t('fldItemSize')} /></td>
                       <td><input value={row.item_color} onChange={(e) => onBulkRowItemColorChange(row.key, e.target.value)} placeholder={t('phColor')} /></td>
                       <td><input value={row.pcs_ea} onChange={(e) => onBulkRowPcsEaChange(row.key, e.target.value)} placeholder={t('fldPcsEa')} /></td>
-                      <td>{formatNumber2(toFiniteNumber(row.unit_weight_kg))}</td>
-                      <td>{formatNumber2(toFiniteNumber(row.qty_m_or_m2))}</td>
-                      <td>{formatNumber2(toFiniteNumber(row.wt_kg))}</td>
+                      <td>{formatWeight5(toFiniteNumber(row.unit_weight_kg))}</td>
+                      <td>{formatQty2(toFiniteNumber(row.qty_m_or_m2))}</td>
+                      <td>{formatWeight5(toFiniteNumber(row.wt_kg))}</td>
                   </tr>,
                   <tr className="spec-note-row" key={`${row.key}-note`}>
-                      <td colSpan={5}>
+                      <td colSpan={showLamiColumnInBulk ? 4 : 3}>
                         <div className="spec-note-wrap">
                           <span>{t('lblOtherNote')}:</span>
                           <input value={row.other_note} onChange={(e) => onBulkRowNoteChange(row.key, e.target.value)} placeholder={t('lblOtherNote')} />
                         </div>
                       </td>
-                      <td colSpan={5} />
+                      <td colSpan={showLamiColumnInBulk ? 5 : 4} />
                   </tr>,
-                ])) : <tr><td className="empty-cell" colSpan={10}>{t('noData')}</td></tr>}
+                ])) : <tr><td className="empty-cell" colSpan={showLamiColumnInBulk ? 9 : 8}>{t('noData')}</td></tr>}
               </tbody>
             </table>
           </div>
@@ -1286,6 +1379,23 @@ export default function ProductsPage({ token, notify, t }: Props) {
           cancelLabel={t('cancel')}
           onConfirm={() => void deleteSelectedSpecs()}
           onCancel={() => setShowBulkSpecDeleteConfirm(false)}
+        />
+        <ConfirmModal
+          open={showTypeChangeConfirm}
+          title={t('confirmTitle')}
+          message="Đổi Loại sản phẩm sẽ xóa các Product Spec có item không thuộc loại mới. Bạn có muốn tiếp tục?"
+          confirmLabel={t('save')}
+          cancelLabel={t('cancel')}
+          onConfirm={() => {
+            const payload = pendingSavePayload
+            setShowTypeChangeConfirm(false)
+            setPendingSavePayload(null)
+            if (payload) void doSaveProduct(payload)
+          }}
+          onCancel={() => {
+            setShowTypeChangeConfirm(false)
+            setPendingSavePayload(null)
+          }}
         />
         <FormModal
           open={showExportModal}
@@ -1383,7 +1493,9 @@ export default function ProductsPage({ token, notify, t }: Props) {
         <button
           className="primary-light"
           onClick={() => {
-            setForm(productInit)
+            resetProductForm()
+            setEditingId(null)
+            setEditingOriginalType('')
             setError('')
             setShowForm(true)
           }}
@@ -1478,7 +1590,7 @@ export default function ProductsPage({ token, notify, t }: Props) {
           <select
             value={pageSize}
             onChange={(e) => {
-              const next = Math.min(10, Math.max(1, Number(e.target.value) || 10))
+              const next = Math.min(50, Math.max(10, Number(e.target.value) || 10))
               setPageSize(next)
               setPage(1)
             }}
@@ -1509,6 +1621,23 @@ export default function ProductsPage({ token, notify, t }: Props) {
         cancelLabel={t('cancel')}
         onConfirm={() => void deleteSelectedProducts()}
         onCancel={() => setShowBulkDeleteConfirm(false)}
+      />
+      <ConfirmModal
+        open={showTypeChangeConfirm}
+        title={t('confirmTitle')}
+        message="Đổi Loại sản phẩm sẽ xóa các Product Spec có item không thuộc loại mới. Bạn có muốn tiếp tục?"
+        confirmLabel={t('save')}
+        cancelLabel={t('cancel')}
+        onConfirm={() => {
+          const payload = pendingSavePayload
+          setShowTypeChangeConfirm(false)
+          setPendingSavePayload(null)
+          if (payload) void doSaveProduct(payload)
+        }}
+        onCancel={() => {
+          setShowTypeChangeConfirm(false)
+          setPendingSavePayload(null)
+        }}
       />
       {productFormModal}
     </div>

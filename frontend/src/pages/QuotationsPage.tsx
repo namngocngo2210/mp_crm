@@ -24,7 +24,7 @@ type PreviewData = {
   row_payload?: { rows?: PreviewRow[]; extra_rows?: QuotationExtraRow[] }
 }
 
-const PAGE_SIZE_OPTIONS = [5, 10]
+const PAGE_SIZE_OPTIONS = [10, 20, 50]
 
 const emptyForm = {
   customer_id: '',
@@ -35,9 +35,19 @@ const emptyForm = {
 
 const emptyExtra = (): QuotationExtraRow => ({ name: '', value: '', amount: 0 })
 
-const numberFmt = (v?: number | null) => {
+const fmtQty2 = (v?: number | null) => {
   if (v == null || Number.isNaN(Number(v))) return '-'
   return Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+
+const fmtWeight5 = (v?: number | null) => {
+  if (v == null || Number.isNaN(Number(v))) return '-'
+  return Number(v).toLocaleString(undefined, { minimumFractionDigits: 5, maximumFractionDigits: 5 })
+}
+
+const fmtPrice3 = (v?: number | null) => {
+  if (v == null || Number.isNaN(Number(v))) return '-'
+  return Number(v).toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })
 }
 
 const QUOTATION_ROW_LABELS: Record<string, string> = {
@@ -64,7 +74,10 @@ const renderRowValue = (row: PreviewRow) => {
     if (isYes) return <CheckCircle2 size={16} color="#16a34a" />
     return <XCircle size={16} color="#dc2626" />
   }
-  if (typeof row.value === 'number') return numberFmt(row.value)
+  if (typeof row.value === 'number') {
+    if (key === 'weight' || key === 'pe' || key === 'pp') return fmtWeight5(row.value)
+    return fmtQty2(row.value)
+  }
   return row.value || '-'
 }
 
@@ -310,7 +323,7 @@ export default function QuotationsPage({ token, notify, t }: Props) {
                 <td>{r.product_code || '-'}</td>
                 <td>{r.product_name || '-'}</td>
                 <td>{r.level_code || '-'} {r.level_factor ? `(${Math.round(r.level_factor * 100)}%)` : ''}</td>
-                <td>{numberFmt(r.total)} $</td>
+                <td>{fmtPrice3(r.total)} $</td>
                 <td>{r.created_at || '-'}</td>
                 <td>{r.updated_at}</td>
                 <td>
@@ -333,7 +346,7 @@ export default function QuotationsPage({ token, notify, t }: Props) {
           <select
             value={pageSize}
             onChange={(e) => {
-              const next = Math.min(10, Math.max(1, Number(e.target.value) || 10))
+              const next = Math.min(50, Math.max(10, Number(e.target.value) || 10))
               setPageSize(next)
               setPage(1)
             }}
@@ -405,7 +418,7 @@ export default function QuotationsPage({ token, notify, t }: Props) {
                       <tr key={`${r.name}-${idx}`}>
                         <td>{rowLabel(r.name)}</td>
                         <td>{renderRowValue(r)}</td>
-                        <td>{r.amount == null ? '-' : numberFmt(r.amount)}</td>
+                        <td>{r.amount == null ? '-' : fmtPrice3(r.amount)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -435,7 +448,7 @@ export default function QuotationsPage({ token, notify, t }: Props) {
                   <tbody>
                     <tr>
                       <td><strong>Tổng</strong></td>
-                      <td><strong>{numberFmt(preview.total)} $</strong></td>
+                      <td><strong>{fmtPrice3(preview.total)} $</strong></td>
                     </tr>
                   </tbody>
                 </table>

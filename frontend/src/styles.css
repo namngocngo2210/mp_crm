@@ -528,10 +528,101 @@ textarea {
   outline: none;
 }
 
+.radix-select-trigger {
+  width: 100%;
+  height: 38px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  padding: 0 10px;
+  font-size: 14px;
+  color: var(--text);
+  background: var(--surface);
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  outline: none;
+}
+
+.radix-select-trigger:focus {
+  border-color: #7da8f6;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.14);
+}
+
+.radix-select-content {
+  z-index: 1200;
+  min-width: var(--radix-select-trigger-width);
+  max-height: 300px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.radix-select-viewport {
+  padding: 6px;
+}
+
+.radix-select-label {
+  padding: 6px 8px 4px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.radix-select-item {
+  height: 34px;
+  border-radius: 8px;
+  padding: 0 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 14px;
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+  outline: none;
+}
+
+.radix-select-item[data-highlighted] {
+  background: var(--brand-soft);
+  color: var(--brand-strong);
+}
+
+.radix-select-item-indicator {
+  display: inline-flex;
+  align-items: center;
+  color: var(--brand-strong);
+}
+
 input[type="checkbox"] {
   width: auto;
   height: auto;
   padding: 0;
+}
+
+.check-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 8px 12px;
+}
+
+.check-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.cell-list {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.cell-list li {
+  margin: 0;
+  line-height: 1.35;
 }
 
 input,

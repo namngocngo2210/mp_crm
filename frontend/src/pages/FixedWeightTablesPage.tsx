@@ -1,37 +1,61 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react'
+import Select from 'react-select'
 import { Pencil, Plus, Trash2 } from 'lucide-react'
 import { api } from '../lib/api'
-import { ProcessingPrice } from '../types'
+import { FixedWeightTable, MaterialMaster } from '../types'
 import { I18nKey } from '../lib/i18n'
 import ConfirmModal from '../components/ConfirmModal'
 import FormModal from '../components/FormModal'
 
 type Props = { token: string; notify: (message: string, type: 'success' | 'error') => void; t: (key: I18nKey) => string }
+type Option = { value: number; label: string }
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50]
-const fmt3 = (v?: number | null) => {
+const fmtWeight5 = (v?: number | null) => {
+  if (v == null || Number.isNaN(Number(v))) return '-'
+  return Number(v).toLocaleString(undefined, { minimumFractionDigits: 5, maximumFractionDigits: 5 })
+}
+const fmtPrice3 = (v?: number | null) => {
   if (v == null || Number.isNaN(Number(v))) return '-'
   return Number(v).toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })
 }
 
-export default function ProcessingPricesPage({ token, notify, t }: Props) {
-  const [rows, setRows] = useState<ProcessingPrice[]>([])
+export default function FixedWeightTablesPage({ token, notify, t }: Props) {
+  const [rows, setRows] = useState<FixedWeightTable[]>([])
+  const [materials, setMaterials] = useState<MaterialMaster[]>([])
   const [search, setSearch] = useState('')
+  const [filterMaterialId, setFilterMaterialId] = useState<number | null>(null)
+
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(10)
   const [showForm, setShowForm] = useState(false)
-  const [editing, setEditing] = useState<ProcessingPrice | null>(null)
-  const [pendingDelete, setPendingDelete] = useState<ProcessingPrice | null>(null)
+  const [editing, setEditing] = useState<FixedWeightTable | null>(null)
+  const [pendingDelete, setPendingDelete] = useState<FixedWeightTable | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false)
 
-  const [processName, setProcessName] = useState('')
+  const [materialId, setMaterialId] = useState<number | null>(null)
+  const [sizeLabel, setSizeLabel] = useState('')
+  const [unitWeightValue, setUnitWeightValue] = useState('')
   const [unitPrice, setUnitPrice] = useState('')
-  const [note, setNote] = useState('')
+
+  const materialOptions: Option[] = materials.map((m) => ({
+    value: m.id,
+    label: `${m.material_name}${m.material_category_name ? ` (${m.material_category_name})` : ''}`,
+  }))
 
   const load = async () => {
-    const data = await api<ProcessingPrice[]>(`/api/processing-prices?search=${encodeURIComponent(search)}`, 'GET', undefined, token)
+    const [data, mgs] = await Promise.all([
+      api<FixedWeightTable[]>(
+        `/api/fixed-weight-tables?search=${encodeURIComponent(search)}${filterMaterialId ? `&material_id=${filterMaterialId}` : ''}`,
+        'GET',
+        undefined,
+        token,
+      ),
+      api<MaterialMaster[]>('/api/materials', 'GET', undefined, token),
+    ])
     setRows(data)
+    setMaterials(mgs)
     setPage(1)
   }
 
@@ -44,44 +68,55 @@ export default function ProcessingPricesPage({ token, notify, t }: Props) {
       void load()
     }, 250)
     return () => window.clearTimeout(timer)
-  }, [search])
+  }, [search, filterMaterialId])
 
   useEffect(() => {
     const valid = new Set(rows.map((r) => r.id))
     setSelectedIds((prev) => new Set([...prev].filter((id) => valid.has(id))))
   }, [rows])
 
-  const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase()
-    if (!q) return rows
-    return rows.filter((r) => (r.process_name || '').toLowerCase().includes(q))
-  }, [rows, search])
+  const resetForm = () => {
+    setEditing(null)
+    setMaterialId(null)
+    setSizeLabel('')
+    setUnitWeightValue('')
+    setUnitPrice('')
+  }
 
   const save = async (e: FormEvent) => {
     e.preventDefault()
-    if (!processName.trim()) return
+    if (!materialId) {
+      notify('Vui lòng chọn Material', 'error')
+      return
+    }
+    if (!sizeLabel.trim()) {
+      notify('Vui lòng nhập Size', 'error')
+      return
+    }
+    if (unitWeightValue.trim() === '' || Number.isNaN(Number(unitWeightValue))) {
+      notify('Định lượng phải là số', 'error')
+      return
+    }
     if (unitPrice.trim() === '' || Number.isNaN(Number(unitPrice))) {
-      notify(t('msgInvalidUnitPrice'), 'error')
+      notify('Giá tiền phải là số', 'error')
       return
     }
     const payload = {
-      process_name: processName.trim(),
+      material_id: materialId,
+      size_label: sizeLabel.trim(),
+      unit_weight_value: unitWeightValue.trim(),
       unit_price: unitPrice.trim(),
-      note: note.trim(),
     }
     try {
       if (editing) {
-        await api(`/api/processing-prices/${editing.id}`, 'PUT', payload, token)
-        notify(t('processingPriceUpdated'), 'success')
+        await api(`/api/fixed-weight-tables/${editing.id}`, 'PUT', payload, token)
+        notify('Cập nhật bảng định lượng thành công', 'success')
       } else {
-        await api('/api/processing-prices', 'POST', payload, token)
-        notify(t('processingPriceCreated'), 'success')
+        await api('/api/fixed-weight-tables', 'POST', payload, token)
+        notify('Tạo bảng định lượng thành công', 'success')
       }
       setShowForm(false)
-      setEditing(null)
-      setProcessName('')
-      setUnitPrice('')
-      setNote('')
+      resetForm()
       await load()
     } catch (err) {
       notify((err as Error).message, 'error')
@@ -91,9 +126,9 @@ export default function ProcessingPricesPage({ token, notify, t }: Props) {
   const deleteOne = async () => {
     if (!pendingDelete) return
     try {
-      await api(`/api/processing-prices/${pendingDelete.id}`, 'DELETE', undefined, token)
+      await api(`/api/fixed-weight-tables/${pendingDelete.id}`, 'DELETE', undefined, token)
       setPendingDelete(null)
-      notify(t('processingPriceDeleted'), 'success')
+      notify('Xóa bảng định lượng thành công', 'success')
       await load()
     } catch (err) {
       notify((err as Error).message, 'error')
@@ -104,7 +139,7 @@ export default function ProcessingPricesPage({ token, notify, t }: Props) {
     const ids = [...selectedIds]
     if (ids.length === 0) return
     try {
-      const results = await Promise.allSettled(ids.map((id) => api(`/api/processing-prices/${id}`, 'DELETE', undefined, token)))
+      const results = await Promise.allSettled(ids.map((id) => api(`/api/fixed-weight-tables/${id}`, 'DELETE', undefined, token)))
       const successCount = results.filter((r) => r.status === 'fulfilled').length
       if (successCount > 0) notify(`${t('deleteSelected')}: ${successCount}/${ids.length}`, 'success')
       else notify(`${t('deleteSelected')}: 0/${ids.length}`, 'error')
@@ -116,6 +151,7 @@ export default function ProcessingPricesPage({ token, notify, t }: Props) {
     }
   }
 
+  const filtered = useMemo(() => rows, [rows])
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize))
   const safePage = Math.min(page, totalPages)
   const start = (safePage - 1) * pageSize
@@ -136,27 +172,29 @@ export default function ProcessingPricesPage({ token, notify, t }: Props) {
   return (
     <div className="page-content">
       <div className="row toolbar-row">
-        <input className="toolbar-search-input" placeholder={t('searchProcessingPrice')} value={search} onChange={(e) => setSearch(e.target.value)} />
-        <button
-          className="danger-light toolbar-add-btn"
-          type="button"
-          disabled={selectedIds.size === 0}
-          onClick={() => setShowBulkDeleteConfirm(true)}
-        >
+        <input className="toolbar-search-input" placeholder="Tìm theo material / size" value={search} onChange={(e) => setSearch(e.target.value)} />
+        <div style={{ minWidth: 240 }}>
+          <Select
+            classNamePrefix="select2"
+            options={materialOptions}
+            value={materialOptions.find((o) => o.value === filterMaterialId) || null}
+            onChange={(opt: Option | null) => setFilterMaterialId(opt?.value ?? null)}
+            placeholder="Lọc material"
+            isClearable
+          />
+        </div>
+        <button className="danger-light toolbar-add-btn" type="button" disabled={selectedIds.size === 0} onClick={() => setShowBulkDeleteConfirm(true)}>
           {t('deleteSelected')}
         </button>
         <button
           className="primary-light"
           type="button"
           onClick={() => {
-            setEditing(null)
-            setProcessName('')
-            setUnitPrice('')
-            setNote('')
+            resetForm()
             setShowForm(true)
           }}
         >
-          <Plus size={15} /> {t('addProcessingPrice')}
+          <Plus size={15} /> Thêm bảng định lượng
         </button>
       </div>
 
@@ -165,9 +203,11 @@ export default function ProcessingPricesPage({ token, notify, t }: Props) {
           <thead>
             <tr>
               <th><input type="checkbox" checked={allPageSelected} onChange={(e) => toggleSelectAllPage(e.target.checked)} /></th>
-              <th>{t('colProcessName')}</th>
-              <th>{t('colUnitPrice')}</th>
-              <th>{t('lblOtherNote')}</th>
+              <th>Material</th>
+              <th>Size (mm)</th>
+              <th>Định lượng</th>
+              <th>Giá tiền ($)</th>
+              <th>{t('colCreatedAt')}</th>
               <th>{t('colUpdatedAt')}</th>
               <th>{t('actions')}</th>
             </tr>
@@ -184,10 +224,12 @@ export default function ProcessingPricesPage({ token, notify, t }: Props) {
                     return next
                   })
                 }} /></td>
-                <td>{r.process_name}</td>
-                <td>{`${fmt3(r.unit_price)}$`}</td>
-                <td>{r.note || '-'}</td>
-                <td>{r.updated_at}</td>
+                <td>{r.material_name || '-'}</td>
+                <td>{r.size_label}</td>
+                <td>{fmtWeight5(r.unit_weight_value)}</td>
+                <td>{fmtPrice3(r.unit_price)}$</td>
+                <td>{r.created_at || '-'}</td>
+                <td>{r.updated_at || '-'}</td>
                 <td>
                   <div className="row action-row">
                     <button
@@ -197,9 +239,10 @@ export default function ProcessingPricesPage({ token, notify, t }: Props) {
                       aria-label={t('edit')}
                       onClick={() => {
                         setEditing(r)
-                        setProcessName(r.process_name)
-                        setUnitPrice(String(r.unit_price ?? ''))
-                        setNote(r.note || '')
+                        setMaterialId(r.material_id || null)
+                        setSizeLabel(r.size_label)
+                        setUnitWeightValue(String(r.unit_weight_value))
+                        setUnitPrice(String(r.unit_price))
                         setShowForm(true)
                       }}
                     >
@@ -212,7 +255,7 @@ export default function ProcessingPricesPage({ token, notify, t }: Props) {
                 </td>
               </tr>
             )) : (
-              <tr><td className="empty-cell" colSpan={6}>{t('noData')}</td></tr>
+              <tr><td className="empty-cell" colSpan={8}>{t('noData')}</td></tr>
             )}
           </tbody>
         </table>
@@ -239,23 +282,31 @@ export default function ProcessingPricesPage({ token, notify, t }: Props) {
         </div>
       </div>
 
-      <FormModal open={showForm} title={editing ? `${t('edit')}: ${editing.process_name}` : t('addProcessingPrice')} onClose={() => setShowForm(false)}>
+      <FormModal open={showForm} title={editing ? `Sửa: ${editing.size_label}` : 'Thêm bảng định lượng'} onClose={() => setShowForm(false)}>
         <form onSubmit={save}>
           <div className="grid-2">
             <div className="form-field">
-              <label>{t('colProcessName')}</label>
-              <input value={processName} onChange={(e) => setProcessName(e.target.value)} placeholder={t('phProcessName')} required />
+              <label>Material</label>
+              <Select
+                classNamePrefix="select2"
+                options={materialOptions}
+                value={materialOptions.find((o) => o.value === materialId) || null}
+                onChange={(opt: Option | null) => setMaterialId(opt?.value ?? null)}
+                placeholder="Chọn material"
+                isClearable
+              />
             </div>
             <div className="form-field">
-              <label>{t('colUnitPrice')}</label>
-              <div className="input-postfix-wrap">
-                <input type="number" step="any" value={unitPrice} onChange={(e) => setUnitPrice(e.target.value)} placeholder={t('phUnitPrice')} required />
-                <span>$</span>
-              </div>
+              <label>Size (mm)</label>
+              <input value={sizeLabel} onChange={(e) => setSizeLabel(e.target.value)} placeholder="Size (mm)" required />
             </div>
-            <div className="form-field full-width">
-              <label>{t('lblOtherNote')}</label>
-              <input value={note} onChange={(e) => setNote(e.target.value)} placeholder={t('phOtherNote')} />
+            <div className="form-field">
+              <label>Định lượng</label>
+              <input type="number" step="any" value={unitWeightValue} onChange={(e) => setUnitWeightValue(e.target.value)} placeholder="Định lượng" required />
+            </div>
+            <div className="form-field">
+              <label>Giá tiền ($)</label>
+              <input type="number" step="any" value={unitPrice} onChange={(e) => setUnitPrice(e.target.value)} placeholder="Giá tiền" required />
             </div>
           </div>
           <div className="row form-actions">
@@ -268,7 +319,7 @@ export default function ProcessingPricesPage({ token, notify, t }: Props) {
       <ConfirmModal
         open={!!pendingDelete}
         title={t('confirmTitle')}
-        message={`${t('confirmDeleteProcessingPrice')} ${pendingDelete?.process_name ?? ''}?`}
+        message={`Bạn có chắc muốn xóa dòng size ${pendingDelete?.size_label || ''}?`}
         confirmLabel={t('delete')}
         cancelLabel={t('cancel')}
         onConfirm={() => void deleteOne()}

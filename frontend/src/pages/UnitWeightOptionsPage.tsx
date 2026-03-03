@@ -8,7 +8,7 @@ import FormModal from '../components/FormModal'
 
 type Props = { token: string; notify: (message: string, type: 'success' | 'error') => void; t: (key: I18nKey) => string }
 
-const PAGE_SIZE_OPTIONS = [5, 10]
+const PAGE_SIZE_OPTIONS = [10, 20, 50]
 
 export default function UnitWeightOptionsPage({ token, notify, t }: Props) {
   const [rows, setRows] = useState<UnitWeightOption[]>([])
@@ -190,7 +190,7 @@ export default function UnitWeightOptionsPage({ token, notify, t }: Props) {
       <div className="table-pagination">
         <div className="row action-row">
           <span>{t('rowsPerPage')}</span>
-          <select value={pageSize} onChange={(e) => { const n = Math.min(10, Math.max(1, Number(e.target.value) || 10)); setPageSize(n); setPage(1) }}>
+          <select value={pageSize} onChange={(e) => { const n = Math.min(50, Math.max(10, Number(e.target.value) || 10)); setPageSize(n); setPage(1) }}>
             {PAGE_SIZE_OPTIONS.map((opt) => <option key={opt} value={opt}>{opt}</option>)}
           </select>
         </div>

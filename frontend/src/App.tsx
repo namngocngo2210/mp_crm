@@ -1,10 +1,12 @@
 import { FormEvent, MouseEvent as ReactMouseEvent, useEffect, useRef, useState } from 'react'
-import { BarChart3, CalendarDays, ChevronDown, Coins, FileText, KeyRound, Layers3, ListChecks, LogOut, Package, PanelLeftClose, PanelLeftOpen, UserRound, Users, UsersRound } from 'lucide-react'
+import { BarChart3, Boxes, CalendarDays, ChevronDown, Coins, FileText, KeyRound, Layers3, ListChecks, LogOut, Package, PanelLeftClose, PanelLeftOpen, Shapes, Tag, UserRound, Users, UsersRound } from 'lucide-react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import CustomersPage from './pages/CustomersPage'
 import ProductsPage from './pages/ProductsPage'
-import MaterialGroupsPage from './pages/MaterialGroupsPage'
-import UnitWeightOptionsPage from './pages/UnitWeightOptionsPage'
+import ProductTypesPage from './pages/ProductTypesPage'
+import FixedWeightTablesPage from './pages/FixedWeightTablesPage'
+import MaterialCategoriesPage from './pages/MaterialCategoriesPage'
+import MaterialsPage from './pages/MaterialsPage'
 import ItemsPage from './pages/ItemsPage'
 import RawMaterialPricesPage from './pages/RawMaterialPricesPage'
 import ProcessingPricesPage from './pages/ProcessingPricesPage'
@@ -21,7 +23,7 @@ type ToastItem = { id: number; message: string; type: ToastType }
 
 type LoginResponse = { token: string; user: AppUser }
 
-const MAIN_ROUTES = ['/stats', '/customers', '/products', '/material-groups', '/unit-weight-options', '/items', '/raw-material-prices', '/processing-prices', '/quotations', '/plans']
+const MAIN_ROUTES = ['/stats', '/customers', '/products', '/product-types', '/fixed-weight-tables', '/material-categories', '/materials', '/items', '/raw-material-prices', '/processing-prices', '/quotations', '/plans']
 
 export default function App() {
   const navigate = useNavigate()
@@ -32,6 +34,7 @@ export default function App() {
   const [token, setToken] = useState<string>(localStorage.getItem('token') || '')
   const [lang, setLang] = useState<Lang>((localStorage.getItem('lang') as Lang) || 'vi')
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(localStorage.getItem('sidebar_collapsed') === '1')
+  const [productMenuOpen, setProductMenuOpen] = useState(true)
   const [materialMenuOpen, setMaterialMenuOpen] = useState(true)
   const [quotationMenuOpen, setQuotationMenuOpen] = useState(true)
   const [username, setUsername] = useState('admin')
@@ -292,8 +295,8 @@ export default function App() {
   }
 
   const avatarFallback = (me?.full_name || me?.username || 'U').slice(0, 1).toUpperCase()
-  const isProductsSection = pathname.startsWith('/products')
-  const isMaterialSection = pathname === '/material-groups' || pathname === '/unit-weight-options'
+  const isProductsSection = pathname === '/products' || pathname === '/product-types' || isProductDetailRoute
+  const isMaterialSection = pathname === '/fixed-weight-tables' || pathname === '/material-categories' || pathname === '/materials'
   const isQuotationSection = pathname === '/raw-material-prices' || pathname === '/processing-prices' || pathname === '/quotations'
 
   return (
@@ -355,21 +358,43 @@ export default function App() {
                   <Users size={15} />
                   <span className="side-label">{tr('tabCustomers')}</span>
                 </button>
-                <button className={`side-btn ${isProductsSection ? 'active' : ''}`} type="button" onClick={() => openRoute('/products')} onAuxClick={onRouteAuxClick('/products')}>
+                <button
+                  className={`side-btn ${isProductsSection ? 'active' : ''}`}
+                  type="button"
+                  onClick={() => {
+                    if (sidebarCollapsed) {
+                      openRoute('/products')
+                    } else {
+                      setProductMenuOpen((v) => !v)
+                    }
+                  }}
+                  onAuxClick={onRouteAuxClick('/products')}
+                >
                   <Package size={15} />
                   <span className="side-label">{tr('tabProducts')}</span>
+                  <ChevronDown size={14} className={`side-chevron ${productMenuOpen ? 'open' : ''}`} />
                 </button>
+                {!sidebarCollapsed && productMenuOpen ? (
+                  <div className="side-submenu">
+                    <button className={`side-sub-btn ${pathname === '/products' || isProductDetailRoute ? 'active' : ''}`} type="button" onClick={() => openRoute('/products')} onAuxClick={onRouteAuxClick('/products')}>
+                      <Package size={14} /> {tr('tabProductList')}
+                    </button>
+                    <button className={`side-sub-btn ${pathname === '/product-types' ? 'active' : ''}`} type="button" onClick={() => openRoute('/product-types')} onAuxClick={onRouteAuxClick('/product-types')}>
+                      <Boxes size={14} /> {tr('tabProductTypes')}
+                    </button>
+                  </div>
+                ) : null}
                 <button
                   className={`side-btn ${isMaterialSection ? 'active' : ''}`}
                   type="button"
                   onClick={() => {
                     if (sidebarCollapsed) {
-                      openRoute('/material-groups')
+                      openRoute('/fixed-weight-tables')
                     } else {
                       setMaterialMenuOpen((v) => !v)
                     }
                   }}
-                  onAuxClick={onRouteAuxClick('/material-groups')}
+                  onAuxClick={onRouteAuxClick('/fixed-weight-tables')}
                 >
                   <Layers3 size={15} />
                   <span className="side-label">{tr('materialGroup')}</span>
@@ -377,11 +402,14 @@ export default function App() {
                 </button>
                 {!sidebarCollapsed && materialMenuOpen ? (
                   <div className="side-submenu">
-                    <button className={`side-sub-btn ${pathname === '/material-groups' ? 'active' : ''}`} type="button" onClick={() => openRoute('/material-groups')} onAuxClick={onRouteAuxClick('/material-groups')}>
-                      {tr('materialGroup')}
+                    <button className={`side-sub-btn ${pathname === '/fixed-weight-tables' ? 'active' : ''}`} type="button" onClick={() => openRoute('/fixed-weight-tables')} onAuxClick={onRouteAuxClick('/fixed-weight-tables')}>
+                      <Layers3 size={14} /> {tr('fixedWeightTables')}
                     </button>
-                    <button className={`side-sub-btn ${pathname === '/unit-weight-options' ? 'active' : ''}`} type="button" onClick={() => openRoute('/unit-weight-options')} onAuxClick={onRouteAuxClick('/unit-weight-options')}>
-                      {tr('unitWeightOptions')}
+                    <button className={`side-sub-btn ${pathname === '/material-categories' ? 'active' : ''}`} type="button" onClick={() => openRoute('/material-categories')} onAuxClick={onRouteAuxClick('/material-categories')}>
+                      <Shapes size={14} /> {tr('materialCategories')}
+                    </button>
+                    <button className={`side-sub-btn ${pathname === '/materials' ? 'active' : ''}`} type="button" onClick={() => openRoute('/materials')} onAuxClick={onRouteAuxClick('/materials')}>
+                      <Tag size={14} /> {tr('materialsMaster')}
                     </button>
                   </div>
                 ) : null}
@@ -416,10 +444,10 @@ export default function App() {
                       <FileText size={14} /> {tr('tabQuotationList')}
                     </button>
                     <button className={`side-sub-btn ${pathname === '/raw-material-prices' ? 'active' : ''}`} type="button" onClick={() => openRoute('/raw-material-prices')} onAuxClick={onRouteAuxClick('/raw-material-prices')}>
-                      {tr('tabRawMaterialPrices')}
+                      <Tag size={14} /> {tr('tabRawMaterialPrices')}
                     </button>
                     <button className={`side-sub-btn ${pathname === '/processing-prices' ? 'active' : ''}`} type="button" onClick={() => openRoute('/processing-prices')} onAuxClick={onRouteAuxClick('/processing-prices')}>
-                      {tr('tabProcessingPrices')}
+                      <Coins size={14} /> {tr('tabProcessingPrices')}
                     </button>
                   </div>
                 ) : null}
@@ -429,8 +457,10 @@ export default function App() {
               {pathname === '/stats' ? <StatisticsPage token={token} notify={pushToast} t={tr} /> : null}
               {pathname === '/customers' ? <CustomersPage token={token} notify={pushToast} t={tr} /> : null}
               {pathname === '/products' || isProductDetailRoute ? <ProductsPage token={token} notify={pushToast} t={tr} /> : null}
-              {pathname === '/material-groups' ? <MaterialGroupsPage token={token} notify={pushToast} t={tr} /> : null}
-              {pathname === '/unit-weight-options' ? <UnitWeightOptionsPage token={token} notify={pushToast} t={tr} /> : null}
+              {pathname === '/product-types' ? <ProductTypesPage token={token} notify={pushToast} t={tr} /> : null}
+              {pathname === '/fixed-weight-tables' ? <FixedWeightTablesPage token={token} notify={pushToast} t={tr} /> : null}
+              {pathname === '/material-categories' ? <MaterialCategoriesPage token={token} notify={pushToast} t={tr} /> : null}
+              {pathname === '/materials' ? <MaterialsPage token={token} notify={pushToast} t={tr} /> : null}
               {pathname === '/items' ? <ItemsPage token={token} notify={pushToast} t={tr} /> : null}
               {pathname === '/raw-material-prices' ? <RawMaterialPricesPage token={token} notify={pushToast} t={tr} /> : null}
               {pathname === '/processing-prices' ? <ProcessingPricesPage token={token} notify={pushToast} t={tr} /> : null}

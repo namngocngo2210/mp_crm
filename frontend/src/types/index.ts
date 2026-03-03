@@ -36,6 +36,14 @@ export type Product = {
   updated_at?: string
 }
 
+export type ProductType = {
+  id: number
+  product_type_name: string
+  formula?: string
+  created_at?: string
+  updated_at?: string
+}
+
 export type ProductionPlan = {
   id: number
   customer_id: number
@@ -59,6 +67,7 @@ export type ProductionPlan = {
 
 export type ProductSpec = {
   id: number
+  item_id: number
   line_no: number
   item_name: string
   material_group?: string
@@ -119,9 +128,34 @@ export type UnitWeightOption = {
   updated_at?: string
 }
 
+export type MaterialCategory = {
+  id: number
+  material_category_name: string
+  spec_format?: 'size' | 'text'
+  format?: string
+  created_at?: string
+  updated_at?: string
+}
+
+export type MaterialMaster = {
+  id: number
+  material_name: string
+  material_category_id?: number
+  material_category_name?: string
+  formula?: string
+  spec?: string
+  lami?: boolean
+  created_at?: string
+  updated_at?: string
+}
+
 export type Item = {
   id: number
   item_name: string
+  material_id?: number
+  material_name?: string
+  product_type_ids?: number[]
+  product_type_names?: string[]
   item_color?: string
   item_size_mode?: 'fixed' | 'formula'
   item_size_fixed_type?: 'number' | 'ab'
@@ -182,6 +216,18 @@ export type Quotation = {
     extra_rows?: QuotationExtraRow[]
   }
   note?: string
+  created_at?: string
+  updated_at?: string
+}
+
+export type FixedWeightTable = {
+  id: number
+  material_id?: number
+  material_name?: string
+  material_category_name?: string
+  size_label: string
+  unit_weight_value: number
+  unit_price: number
   created_at?: string
   updated_at?: string
 }
